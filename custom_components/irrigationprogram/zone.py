@@ -62,8 +62,10 @@ from .const import (
     RAINBIRD,
     RAINBIRD_DURATION,
     RAINBIRD_TURN_ON,
+    RAINPOINT,
     TIME_STR_FORMAT,
 )
+from .command_lane import get_lane
 from .globals import ZONES
 
 VALID_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -201,6 +203,9 @@ class Zone(SwitchEntity, RestoreEntity):
     @property
     def optimistic(self) -> bool:
         """Fire the solenoid command once and run on the timer without confirming state."""
+        # cloud controllers self-time on the device, so optimistic is implied
+        if self.controller_type == RAINPOINT:
+            return True
         return self._zonedata.optimistic
 
     @property
@@ -995,6 +1000,26 @@ class Zone(SwitchEntity, RestoreEntity):
             day_diff = 7 - (start_time_w - target_w)
         return start_date + timedelta(days=day_diff)
 
+    def _submit_cloud_command(self, opening: bool) -> None:
+        """Queue an open/close for a cloud controller onto its serialized lane.
+
+        The lane (shared per controller type) spaces commands, confirms the
+        target reaches its expected state, retries with backoff and
+        dead-letters, so a rate-limited or command-dropping cloud account is
+        driven safely.
+        """
+        if self.entity_type == CONST_VALVE:
+            domain = CONST_VALVE
+            service = SERVICE_OPEN_VALVE if opening else SERVICE_CLOSE_VALVE
+            expected = (CONST_OPEN, CONST_ON) if opening else (CONST_CLOSED, CONST_OFF)
+        else:
+            domain = CONST_SWITCH
+            service = SERVICE_TURN_ON if opening else SERVICE_TURN_OFF
+            expected = (CONST_ON, CONST_OPEN) if opening else (CONST_OFF, CONST_CLOSED)
+        get_lane(self.hass, self.controller_type).submit(
+            self.solenoid, domain, service, expected
+        )
+
     async def async_solenoid_turn_on(self):
         """Turn on the zone."""
 
@@ -1064,6 +1089,9 @@ class Zone(SwitchEntity, RestoreEntity):
                         BHYVE_DURATION: duration,
                     },
                 )
+            elif self.controller_type == RAINPOINT:
+                # cloud valve: queue the open on the serialized command lane
+                self._submit_cloud_command(opening=True)
             elif self.entity_type == CONST_VALVE:
                 # valve
                 await self.hass.services.async_call(
@@ -1100,6 +1128,9 @@ class Zone(SwitchEntity, RestoreEntity):
             await self.hass.services.async_call(
                 BHYVE, "stop_watering", {ATTR_ENTITY_ID: self.solenoid}
             )
+        elif self.controller_type == RAINPOINT:
+            # cloud valve: queue the close on the serialized command lane
+            self._submit_cloud_command(opening=False)
         elif self.entity_type == CONST_VALVE:
             # postion entity defined get the value
             await self.hass.services.async_call(

@@ -10,6 +10,18 @@ BHYVE_TURN_ON = "start_watering"
 BHYVE = "bhyve"
 BHYVE_DURATION = "minutes"
 
+RAINPOINT = "rainpoint"
+
+# Serialized command lane defaults for cloud-backed controllers. Cloud valve
+# integrations often accept only one command per account at a time and may
+# silently drop commands, so commands sharing a lane are serialized, spaced,
+# confirmed by state, retried with backoff, then dead-lettered.
+CONST_LANE_MIN_SPACING = 30      # seconds between commands on one lane
+CONST_LANE_CONFIRM_TIMEOUT = 15  # seconds to confirm a command took effect
+CONST_LANE_POLL_INTERVAL = 1     # seconds between state polls while confirming
+CONST_LANE_MAX_ATTEMPTS = 3      # attempts before dead-lettering
+CONST_LANE_BACKOFF_BASE = 2      # exponential backoff base (seconds)
+
 DOMAIN = "irrigationprogram"
 SWITCH_ID_FORMAT = "switch.{}"
 

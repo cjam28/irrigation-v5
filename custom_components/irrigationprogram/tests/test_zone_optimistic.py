@@ -12,6 +12,8 @@ from custom_components.irrigationprogram.zone import Zone
 def _bare_zone(optimistic):
     """Build a Zone bypassing __init__, with only what the short-circuits need."""
     zone = Zone.__new__(Zone)
+    zone._programdata = MagicMock()
+    zone._programdata.controller_type = "Generic"
     zone._zonedata = MagicMock()
     zone._zonedata.optimistic = optimistic
     zone.async_solenoid_turn_on = AsyncMock()
@@ -29,6 +31,8 @@ def _bare_zone(optimistic):
 async def test_optimistic_property_reads_zonedata():
     """The optimistic property passes through IrrigationZoneData.optimistic."""
     zone = Zone.__new__(Zone)
+    zone._programdata = MagicMock()
+    zone._programdata.controller_type = "Generic"
     zone._zonedata = MagicMock()
     zone._zonedata.optimistic = True
     assert zone.optimistic is True

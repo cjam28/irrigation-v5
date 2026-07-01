@@ -3,7 +3,8 @@
 		"device_type": {
 			"options": {
 				"generic": "Generic",
-				"rainbird": "RainBird"
+				"rainbird": "RainBird",
+				"rainpoint": "RainPoint"
 			}
 		},
 		"watering_type":{
