@@ -168,6 +168,78 @@ async def test_deferred_setup_timeout_proceeds_with_partial_setup(
     mock_hass.config_entries.async_forward_entry_setups.assert_awaited()
 
 
+async def test_deferred_partial_setup_survives_missing_zone_entities(
+    mock_hass, mock_config_entry
+):
+    """Partial setup must complete when zone entities are genuinely missing.
+
+    The missing-entity notification path is the whole point of partial setup;
+    it must raise the notification and still bind the program, not crash.
+    """
+    mock_hass.is_running = False
+    mock_hass.states.get.return_value = None  # nothing has loaded yet
+    captured = {}
+    mock_hass.bus.async_listen_once = MagicMock(
+        side_effect=lambda event, cb: captured.__setitem__("cb", cb)
+    )
+
+    assert await async_setup_entry(mock_hass, mock_config_entry) is True
+
+    with (
+        patch(
+            "custom_components.irrigationprogram.asyncio.wait_for",
+            side_effect=asyncio.TimeoutError,
+        ),
+        patch("custom_components.irrigationprogram.async_create") as notify,
+    ):
+        await captured["cb"](MagicMock())  # must not raise
+
+    assert mock_config_entry.runtime_data is not None
+    mock_hass.config_entries.async_forward_entry_setups.assert_awaited()
+    notify.assert_called_once()
+    assert "switch.zone1" in notify.call_args.kwargs["message"]
+
+
+async def test_deferred_partial_setup_survives_missing_zone_sensors(
+    mock_hass, mock_config_entry
+):
+    """Partial setup must warn (not crash) when only zone sensors are missing."""
+    zone = dict(mock_config_entry.options[ATTR_ZONES][0])
+    zone[ATTR_RAIN_SENSOR] = "sensor.rain1"
+    zone[ATTR_WATER_ADJUST] = "sensor.adjust1"
+    mock_config_entry.options = {
+        **mock_config_entry.options,
+        ATTR_ZONES: [zone],
+    }
+    mock_hass.is_running = False
+    zone_state = MagicMock()
+    zone_state.state = "off"
+    mock_hass.states.get.side_effect = (
+        lambda entity_id: zone_state if entity_id == "switch.zone1" else None
+    )
+    captured = {}
+    mock_hass.bus.async_listen_once = MagicMock(
+        side_effect=lambda event, cb: captured.__setitem__("cb", cb)
+    )
+
+    assert await async_setup_entry(mock_hass, mock_config_entry) is True
+
+    with (
+        patch(
+            "custom_components.irrigationprogram.asyncio.wait_for",
+            side_effect=asyncio.TimeoutError,
+        ),
+        patch("custom_components.irrigationprogram.async_create") as notify,
+    ):
+        await captured["cb"](MagicMock())  # must not raise
+
+    assert mock_config_entry.runtime_data is not None
+    notify.assert_called_once()
+    message = notify.call_args.kwargs["message"]
+    assert "sensor.adjust1" in message
+    assert "sensor.rain1" in message
+
+
 async def test_irrigation_program_initialization(mock_config_entry):
     """Test IrrigationProgram dataclass initialization."""
     config = {
