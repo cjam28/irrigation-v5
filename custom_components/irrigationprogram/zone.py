@@ -212,6 +212,15 @@ class Zone(SwitchEntity, RestoreEntity):
         return self._zonedata.optimistic
 
     @property
+    def uses_command_lane(self) -> bool:
+        """Controllers driven through the serialized lane.
+
+        Their commands are spaced/queued so the local HA state routinely lags
+        the intent; it must not gate whether a solenoid command is issued.
+        """
+        return self.controller_type == RAINPOINT
+
+    @property
     def measurement(self) -> str:
         """Switch or Valve."""
         return self._programdata.min_sec
@@ -1078,7 +1087,10 @@ class Zone(SwitchEntity, RestoreEntity):
                 await asyncio.sleep(delay)
 
         check_state, _value = await self.check_switch_state()
-        if check_state is False:
+        # lane controllers: the local state lags the queued command, so issue
+        # the open regardless (the lane confirms/retries and re-opening is
+        # idempotent); other controllers only fire when not already on
+        if check_state is False or self.uses_command_lane:
             if self.controller_type == RAINBIRD:
                 # RAINBIRD controller requires a different service call
                 await self._call_duration_controller(
@@ -1125,7 +1137,9 @@ class Zone(SwitchEntity, RestoreEntity):
         """Turn off the device."""
         #if already off do nothing
         check_state, _value = await self.check_switch_state()
-        if check_state is False:
+        # lane controllers: never skip the close on local state (it lags the
+        # queued command); closing an already-closed valve is idempotent
+        if check_state is False and not self.uses_command_lane:
             return
 
         # is it a valve or a switch

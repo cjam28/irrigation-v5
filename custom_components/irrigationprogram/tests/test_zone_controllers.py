@@ -1,6 +1,6 @@
 """Tests for the cloud controller categories (F5 rainpoint, F6 hydrawise)."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from homeassistant.const import (
     ATTR_ENTITY_ID,
@@ -36,6 +36,64 @@ async def test_non_cloud_controller_not_optimistic_by_default():
     """A generic zone is not optimistic unless explicitly flagged."""
     zone = _controller_zone("Generic")
     assert zone.optimistic is False
+
+
+async def test_uses_command_lane_only_for_rainpoint():
+    """Only the lane-backed cloud controller has non-authoritative local state."""
+    assert _controller_zone("rainpoint").uses_command_lane is True
+    assert _controller_zone("hydrawise").uses_command_lane is False
+    assert _controller_zone("Generic").uses_command_lane is False
+
+
+def _full_rainpoint_zone(state):
+    """A rainpoint zone runnable through the full turn on/off path."""
+    zone = _controller_zone("rainpoint", entity_type="valve", zone_entity="valve.z1")
+    zone._zonedata.name = "z1"
+    zone._pump = None  # skip the pump prelude in async_solenoid_turn_on
+    zone._scheduled = False
+    zone._state = "open"
+    zone._remaining_time = 0
+    zone.hass.bus.async_fire = MagicMock()
+    zone.check_switch_state = AsyncMock(return_value=state)
+    return zone
+
+
+async def test_rainpoint_close_submitted_when_local_state_reads_closed():
+    """The rainpoint close must be queued even if HA state lags to 'closed'.
+
+    Regression: the early-return on local state would leave the valve open.
+    """
+    zone = _full_rainpoint_zone(state=(False, "closed"))  # stale/lagging closed
+    with (
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+    ):
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone.async_solenoid_turn_off()
+    lane.submit.assert_called_once()
+    assert lane.submit.call_args[0][2] == SERVICE_CLOSE_VALVE
+
+
+async def test_rainpoint_open_submitted_when_local_state_reads_open():
+    """The rainpoint open must be queued even if HA state lags to 'open'.
+
+    Regression: the state gate would suppress a repeat's open and a pending
+    close would then shut the valve mid-repeat.
+    """
+    zone = _full_rainpoint_zone(state=(True, "open"))  # stale/lagging open
+    with (
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+        patch.object(Zone, "water", new_callable=PropertyMock, return_value=10),
+        patch.object(Zone, "wait", new_callable=PropertyMock, return_value=0),
+        patch.object(Zone, "repeat", new_callable=PropertyMock, return_value=1),
+    ):
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone.async_solenoid_turn_on()
+    lane.submit.assert_called_once()
+    assert lane.submit.call_args[0][2] == SERVICE_OPEN_VALVE
 
 
 async def test_submit_cloud_command_opens_valve_via_lane():
