@@ -64,6 +64,7 @@ from .const import (
     ATTR_ZONE_DELAY_MAX,
     ATTR_ZONES,
     CONST_ECO,
+    CONST_OPTIMISTIC,
     DOMAIN,
 )
 from .globals import QUEUEDPROGRAMS
@@ -125,6 +126,9 @@ class IrrigationZoneData:
     rain_sensor: str  # sensor.example
     adjustment: str  # sensor.example
     flow_rate: Any|str  # sensor.example
+    # fire the solenoid command once and run on the timer without confirming
+    # state (for slow/cloud valves); must stay last as the only defaulted field
+    optimistic: bool = False
 
 @dataclass
 class IrrigationProgram:
@@ -277,6 +281,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 name=zone.get(ATTR_ZONE).split(".")[1],
                 config=None,
                 eco=zone.get(CONST_ECO, False),
+                optimistic=zone.get(CONST_OPTIMISTIC, False),
                 watering_type=zone.get(ATTR_WATER_TYPE),
                 water=None,
                 wait=None,

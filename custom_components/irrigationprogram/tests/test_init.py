@@ -244,6 +244,38 @@ async def test_irrigation_zone_data_initialization():
     assert zone_data.freq is True
     assert zone_data.rain_sensor == "sensor.rain1"
     assert zone_data.adjustment == "sensor.adjust1"
+    # optimistic defaults to False when not supplied
+    assert zone_data.optimistic is False
+
+
+async def test_irrigation_zone_data_optimistic():
+    """IrrigationZoneData accepts an explicit optimistic flag."""
+    zone_data = IrrigationZoneData(
+        zone="valve.zone1",
+        switch=None,
+        type="valve",
+        name="zone1",
+        config=None,
+        eco=False,
+        watering_type="fixed",
+        water=None,
+        wait=None,
+        repeat=None,
+        frequency=None,
+        freq=False,
+        ignore_sensors=None,
+        enabled=None,
+        status=None,
+        next_run=None,
+        last_ran=None,
+        remaining_time=None,
+        default_run_time=None,
+        rain_sensor=None,
+        adjustment=None,
+        flow_rate=None,
+        optimistic=True,
+    )
+    assert zone_data.optimistic is True
 
 
 async def test_irrigation_data_structure(mock_config_entry):

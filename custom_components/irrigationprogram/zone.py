@@ -199,6 +199,11 @@ class Zone(SwitchEntity, RestoreEntity):
         return self._zonedata.type
 
     @property
+    def optimistic(self) -> bool:
+        """Fire the solenoid command once and run on the timer without confirming state."""
+        return self._zonedata.optimistic
+
+    @property
     def measurement(self) -> str:
         """Switch or Valve."""
         return self._programdata.min_sec
@@ -513,6 +518,9 @@ class Zone(SwitchEntity, RestoreEntity):
     async def check_is_on(self):
         """Ensure the switch has turned on."""
         await self.async_solenoid_turn_on()
+        if self.optimistic:
+            # fire once and trust it; the program timer governs the run
+            return
         timeout = self._latency
         starttime = datetime.now()
         while datetime.now() - starttime < timedelta(seconds=timeout):
@@ -551,6 +559,9 @@ class Zone(SwitchEntity, RestoreEntity):
 
     async def check_is_off(self):
         """Ensure the switch is off."""
+        if self.optimistic:
+            # the caller already fired the off command; trust it
+            return
         timeout = self._latency
         starttime = datetime.now()
         while datetime.now() - starttime < timedelta(seconds=timeout):
@@ -1440,27 +1451,30 @@ class Zone(SwitchEntity, RestoreEntity):
                     continue
                 break
             else:
-                if not warning_issued:
-                    async_dismiss(self.hass, "irrigation_latency")
-                    async_create(
-                        self.hass,
-                        message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
-                        title="Irrigation Controller",
-                        notification_id="irrigation_latency",
-                    )
-                warning_issued = True
-                event_data = {
-                    "action": "error",
-                    "error": "Returned an unexpected state",
-                    "device_id": self.entity_id,
-                    "scheduled": self._scheduled,
-                    "program": self.name,
-                    "state": status,
-                }
-                self.hass.bus.async_fire("irrigation_event", event_data)
-                if not self._continue_on_unexpected_state:
-                    # if the zone is not on, but the state is not what we expect, terminate the zone
-                    await self.async_turn_off_zone_natural()
+                if not self.optimistic:
+                    # optimistic zones fire once and run on the timer; an
+                    # unconfirmed state is expected and must not terminate them
+                    if not warning_issued:
+                        async_dismiss(self.hass, "irrigation_latency")
+                        async_create(
+                            self.hass,
+                            message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
+                            title="Irrigation Controller",
+                            notification_id="irrigation_latency",
+                        )
+                    warning_issued = True
+                    event_data = {
+                        "action": "error",
+                        "error": "Returned an unexpected state",
+                        "device_id": self.entity_id,
+                        "scheduled": self._scheduled,
+                        "program": self.name,
+                        "state": status,
+                    }
+                    self.hass.bus.async_fire("irrigation_event", event_data)
+                    if not self._continue_on_unexpected_state:
+                        # if the zone is not on, but the state is not what we expect, terminate the zone
+                        await self.async_turn_off_zone_natural()
 
         return seconds_run
 
@@ -1537,27 +1551,30 @@ class Zone(SwitchEntity, RestoreEntity):
                     continue
                 break
             else:
-                if not warning_issued:
-                    async_dismiss(self.hass, "irrigation_latency")
-                    async_create(
-                        self.hass,
-                        message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
-                        title="Irrigation Controller",
-                        notification_id="irrigation_latency",
-                    )
-                warning_issued = True
-                event_data = {
-                    "action": "error",
-                    "error": "Returned an unexpected state",
-                    "device_id": self.entity_id,
-                    "scheduled": self._scheduled,
-                    "program": self.name,
-                    "state": status,
-                }
-                self.hass.bus.async_fire("irrigation_event", event_data)
-                if not self._continue_on_unexpected_state:
-                    # if the zone is not on, but the state is not what we expect, terminate the zone
-                    await self.async_turn_off_zone_natural()
+                if not self.optimistic:
+                    # optimistic zones fire once and run on the timer; an
+                    # unconfirmed state is expected and must not terminate them
+                    if not warning_issued:
+                        async_dismiss(self.hass, "irrigation_latency")
+                        async_create(
+                            self.hass,
+                            message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
+                            title="Irrigation Controller",
+                            notification_id="irrigation_latency",
+                        )
+                    warning_issued = True
+                    event_data = {
+                        "action": "error",
+                        "error": "Returned an unexpected state",
+                        "device_id": self.entity_id,
+                        "scheduled": self._scheduled,
+                        "program": self.name,
+                        "state": status,
+                    }
+                    self.hass.bus.async_fire("irrigation_event", event_data)
+                    if not self._continue_on_unexpected_state:
+                        # if the zone is not on, but the state is not what we expect, terminate the zone
+                        await self.async_turn_off_zone_natural()
 
             # If no flow for 5 cycles, shut off, possible flow sensor has failed
             if self.flow_sensor == 0:

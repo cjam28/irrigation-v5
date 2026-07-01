@@ -303,6 +303,10 @@ class IrrigationFlowHandler(config_entries.ConfigFlow):
                     "eco",
                     description={"suggested_value": default_input.get("eco", False)},
                 ): cv.boolean,
+                vol.Optional(
+                    "optimistic",
+                    description={"suggested_value": default_input.get("optimistic", False)},
+                ): cv.boolean,
             }
         )
         if self._data.get(ATTR_FLOW_SENSOR, None):
@@ -496,6 +500,10 @@ class IrrigationFlowHandler(config_entries.ConfigFlow):
                 vol.Optional(
                     "eco",
                     description={"suggested_value": default_input.get("eco", False)},
+                ): cv.boolean,
+                vol.Optional(
+                    "optimistic",
+                    description={"suggested_value": default_input.get("optimistic", False)},
                 ): cv.boolean,
             }
         )
@@ -1381,6 +1389,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "eco",
                     description={"suggested_value": default_input.get("eco", False)},
                 ): cv.boolean,
+                vol.Optional(
+                    "optimistic",
+                    description={"suggested_value": default_input.get("optimistic", False)},
+                ): cv.boolean,
             }
         )
 
@@ -1488,6 +1500,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     "eco",
                     description={"suggested_value": default_input.get("eco", False)},
+                ): cv.boolean,
+                vol.Optional(
+                    "optimistic",
+                    description={"suggested_value": default_input.get("optimistic", False)},
                 ): cv.boolean,
             }
         )
