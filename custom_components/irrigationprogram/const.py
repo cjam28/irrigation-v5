@@ -21,7 +21,10 @@ RAINPOINT = "rainpoint"
 # silently drop commands, so commands sharing a lane are serialized, spaced,
 # confirmed by state, retried with backoff, then dead-lettered.
 CONST_LANE_MIN_SPACING = 30      # seconds between commands on one lane
-CONST_LANE_CONFIRM_TIMEOUT = 15  # seconds to confirm a command took effect
+# Cloud integrations often refresh local state only on their next poll (60s or
+# more); a confirm window shorter than that would retry and then dead-letter
+# commands that actually succeeded.
+CONST_LANE_CONFIRM_TIMEOUT = 90  # seconds to confirm a command took effect
 CONST_LANE_POLL_INTERVAL = 1     # seconds between state polls while confirming
 CONST_LANE_MAX_ATTEMPTS = 3      # attempts before dead-lettering
 CONST_LANE_BACKOFF_BASE = 2      # exponential backoff base (seconds)

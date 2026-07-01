@@ -112,14 +112,31 @@ class CommandLane:
                 self._queue.task_done()
 
     async def _deliver(self, cmd: _Command) -> bool:
-        await self._space()
         for attempt in range(1, self._max_attempts + 1):
-            await self.hass.services.async_call(
-                cmd.domain,
-                cmd.service,
-                {ATTR_ENTITY_ID: cmd.entity_id, **cmd.data},
-            )
-            if await self._confirm(cmd):
+            # every attempt is a cloud call, so each one honours the spacing
+            await self._space()
+            try:
+                await self.hass.services.async_call(
+                    cmd.domain,
+                    cmd.service,
+                    {ATTR_ENTITY_ID: cmd.entity_id, **cmd.data},
+                )
+            except Exception as err:  # noqa: BLE001 - cloud errors are the point
+                # rate-limited / dropped by the cloud (e.g. code=4004, timeout):
+                # a failed attempt, not a lane failure - retry then dead-letter
+                _LOGGER.warning(
+                    "Attempt %d/%d of %s.%s for %s failed: %s",
+                    attempt,
+                    self._max_attempts,
+                    cmd.domain,
+                    cmd.service,
+                    cmd.entity_id,
+                    err,
+                )
+                confirmed = False
+            else:
+                confirmed = await self._confirm(cmd)
+            if confirmed:
                 return True
             if attempt < self._max_attempts:
                 await self._sleep(self._backoff_base ** (attempt - 1))
@@ -149,6 +166,8 @@ class CommandLane:
 
     def _dead_letter(self, cmd: _Command) -> None:
         self.dead_letters.append(cmd)
+        # keep the tail only; the list is diagnostic, not a work queue
+        del self.dead_letters[:-50]
         _LOGGER.error(
             "Command lane '%s' dead-lettered %s.%s for %s after %d attempts",
             self.key,
