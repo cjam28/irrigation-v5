@@ -28,6 +28,7 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 
 from . import utils
@@ -201,11 +202,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             # Wait for all objects with a strict timeout
             await asyncio.wait_for(_wait_for_objects(), timeout=TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            _LOGGER.warning(
-                "Timed out waiting for objects: %s, Proceeding with partial setup",
-                REQUIRED_OBJECTS
-            )
+        except asyncio.TimeoutError as err:
+            # Fail cleanly instead of proceeding with a half-initialised
+            # program; Home Assistant will retry once the entities exist.
+            raise ConfigEntryNotReady(
+                f"Timed out waiting for required entities: {REQUIRED_OBJECTS}"
+            ) from err
 
         program = IrrigationProgram(
             name=entry.title,

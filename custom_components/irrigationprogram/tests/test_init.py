@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.irrigationprogram import (
     IrrigationData,
@@ -108,6 +110,29 @@ async def test_async_setup_entry_basic(mock_hass, mock_config_entry):
     assert len(zones) == 1
     assert isinstance(zones[0], IrrigationZoneData)
     assert zones[0].zone == "switch.zone1"
+
+
+async def test_async_setup_entry_raises_when_objects_time_out(
+    mock_hass, mock_config_entry
+):
+    """A timeout waiting for required entities raises ConfigEntryNotReady.
+
+    The entry must fail cleanly (so HA retries) rather than proceeding with a
+    half-initialised program.
+    """
+    with (
+        patch(
+            "custom_components.irrigationprogram.asyncio.wait_for",
+            side_effect=asyncio.TimeoutError,
+        ),
+        patch("homeassistant.components.persistent_notification.async_create"),
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await async_setup_entry(mock_hass, mock_config_entry)
+
+    # No partial setup: runtime_data left unset and no platforms forwarded.
+    assert mock_config_entry.runtime_data is None
+    mock_hass.config_entries.async_forward_entry_setups.assert_not_awaited()
 
 
 async def test_irrigation_program_initialization(mock_config_entry):
