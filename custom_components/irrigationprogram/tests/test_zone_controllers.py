@@ -1,8 +1,9 @@
 """Tests for the cloud controller categories (F5 rainpoint, F6 hydrawise)."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.const import (
+    ATTR_ENTITY_ID,
     SERVICE_CLOSE_VALVE,
     SERVICE_OPEN_VALVE,
     SERVICE_TURN_OFF,
@@ -64,6 +65,27 @@ async def test_submit_cloud_command_closes_valve_via_lane():
     assert domain == "valve"
     assert service == SERVICE_CLOSE_VALVE
     assert "closed" in expected
+
+
+async def test_hydrawise_optimistic_auto_implied():
+    """A hydrawise zone is optimistic regardless of its per-zone flag."""
+    zone = _controller_zone("hydrawise")
+    assert zone.optimistic is True
+
+
+async def test_duration_controller_passes_run_minutes():
+    """A duration-based controller receives the V5 run time in whole minutes."""
+    zone = _controller_zone("hydrawise")
+    zone._zonedata.repeat = None  # -> repeat property returns 1
+    zone._scheduled = False
+    zone.calc_run_time = AsyncMock(return_value=125)  # seconds
+    zone.hass.services.async_call = AsyncMock()
+    await zone._call_duration_controller("hydrawise", "start_watering", "duration")
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "hydrawise",
+        "start_watering",
+        {ATTR_ENTITY_ID: "valve.z1", "duration": 3},  # ceil(125 / 60)
+    )
 
 
 async def test_submit_cloud_command_switch_entity_uses_turn_on_off():

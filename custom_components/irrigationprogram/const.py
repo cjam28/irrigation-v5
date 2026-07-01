@@ -10,6 +10,10 @@ BHYVE_TURN_ON = "start_watering"
 BHYVE = "bhyve"
 BHYVE_DURATION = "minutes"
 
+HYDRAWISE_TURN_ON = "start_watering"
+HYDRAWISE = "hydrawise"
+HYDRAWISE_DURATION = "duration"
+
 RAINPOINT = "rainpoint"
 
 # Serialized command lane defaults for cloud-backed controllers. Cloud valve

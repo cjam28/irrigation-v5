@@ -5,7 +5,8 @@
 				"generic": "Generic",
 				"rainbird": "RainBird",
 				"bhyve": "B-Hyve",
-				"rainpoint": "RainPoint"
+				"rainpoint": "RainPoint",
+				"hydrawise": "Hydrawise"
 			}
 		},
 		"watering_type":{

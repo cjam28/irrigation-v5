@@ -4,7 +4,8 @@
 			"options": {
 				"generic": "Generic",
 				"rainbird": "RainBird",
-				"rainpoint": "RainPoint"
+				"rainpoint": "RainPoint",
+				"hydrawise": "Hydrawise"
 			}
 		},
 		"watering_type":{

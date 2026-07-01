@@ -41,6 +41,9 @@ from .const import (
     BHYVE,
     BHYVE_DURATION,
     BHYVE_TURN_ON,
+    HYDRAWISE,
+    HYDRAWISE_DURATION,
+    HYDRAWISE_TURN_ON,
     CONST_ADJUSTED_OFF,
     CONST_CLOSED,
     CONST_DISABLED,
@@ -204,7 +207,7 @@ class Zone(SwitchEntity, RestoreEntity):
     def optimistic(self) -> bool:
         """Fire the solenoid command once and run on the timer without confirming state."""
         # cloud controllers self-time on the device, so optimistic is implied
-        if self.controller_type == RAINPOINT:
+        if self.controller_type in (RAINPOINT, HYDRAWISE):
             return True
         return self._zonedata.optimistic
 
@@ -1000,6 +1003,25 @@ class Zone(SwitchEntity, RestoreEntity):
             day_diff = 7 - (start_time_w - target_w)
         return start_date + timedelta(days=day_diff)
 
+    async def _call_duration_controller(
+        self, domain: str, service: str, duration_key: str
+    ) -> None:
+        """Start a controller that self-times, passing the V5 run length in minutes.
+
+        RAINBIRD, B-Hyve and Hydrawise each expose a service that runs a zone
+        for a supplied duration; the device counts down independently so the V5
+        program timer and the device stay in step.
+        """
+        duration = await self.calc_run_time(
+            repeats_remaining=self.repeat, scheduled=self.scheduled
+        )
+        duration = math.ceil(duration / 60)
+        await self.hass.services.async_call(
+            domain,
+            service,
+            {ATTR_ENTITY_ID: self.solenoid, duration_key: duration},
+        )
+
     def _submit_cloud_command(self, opening: bool) -> None:
         """Queue an open/close for a cloud controller onto its serialized lane.
 
@@ -1059,35 +1081,18 @@ class Zone(SwitchEntity, RestoreEntity):
         if check_state is False:
             if self.controller_type == RAINBIRD:
                 # RAINBIRD controller requires a different service call
-                duration = await self.calc_run_time(
-                    repeats_remaining=self.repeat, scheduled=self.scheduled
-                )
-
-                duration = math.ceil(duration / 60)
-
-                await self.hass.services.async_call(
-                    RAINBIRD,
-                    RAINBIRD_TURN_ON,
-                    {
-                        ATTR_ENTITY_ID: self.solenoid,
-                        RAINBIRD_DURATION: duration,
-                    },
+                await self._call_duration_controller(
+                    RAINBIRD, RAINBIRD_TURN_ON, RAINBIRD_DURATION
                 )
             elif self.controller_type == BHYVE:
                 # B-Hyve controller requires a different service call
-                duration = await self.calc_run_time(
-                    repeats_remaining=self.repeat, scheduled=self.scheduled
+                await self._call_duration_controller(
+                    BHYVE, BHYVE_TURN_ON, BHYVE_DURATION
                 )
-
-                duration = math.ceil(duration / 60)
-
-                await self.hass.services.async_call(
-                    BHYVE,
-                    BHYVE_TURN_ON,
-                    {
-                        ATTR_ENTITY_ID: self.solenoid,
-                        BHYVE_DURATION: duration,
-                    },
+            elif self.controller_type == HYDRAWISE:
+                # Hydrawise self-times like B-Hyve; it closes via valve.close_valve
+                await self._call_duration_controller(
+                    HYDRAWISE, HYDRAWISE_TURN_ON, HYDRAWISE_DURATION
                 )
             elif self.controller_type == RAINPOINT:
                 # cloud valve: queue the open on the serialized command lane

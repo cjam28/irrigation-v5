@@ -206,7 +206,7 @@ class IrrigationFlowHandler(config_entries.ConfigFlow):
                     default=default_input.get(ATTR_DEVICE_TYPE, "generic"),
                 ): sel.SelectSelector(
                     {
-                        "options": ["generic", "rainbird", "bhyve", "rainpoint"],
+                        "options": ["generic", "rainbird", "bhyve", "rainpoint", "hydrawise"],
                         "translation_key": ATTR_DEVICE_TYPE,
                     }
                 ),
@@ -1163,7 +1163,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     },
                 ): sel.SelectSelector(
                     {
-                        "options": ["generic", "rainbird", "bhyve", "rainpoint"],
+                        "options": ["generic", "rainbird", "bhyve", "rainpoint", "hydrawise"],
                         "translation_key": ATTR_DEVICE_TYPE,
                     }
                 ),
