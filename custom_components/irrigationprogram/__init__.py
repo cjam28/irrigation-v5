@@ -207,11 +207,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Wait for all objects with a strict timeout
             await asyncio.wait_for(_wait_for_objects(), timeout=TIMEOUT_SECONDS)
         except asyncio.TimeoutError as err:
-            # Fail cleanly instead of proceeding with a half-initialised
-            # program; Home Assistant will retry once the entities exist.
-            raise ConfigEntryNotReady(
-                f"Timed out waiting for required entities: {REQUIRED_OBJECTS}"
-            ) from err
+            if _event is None:
+                # Awaited (reload / added while running) path: fail cleanly so
+                # Home Assistant retries once the entities exist, instead of
+                # building a half-initialised program.
+                raise ConfigEntryNotReady(
+                    f"Timed out waiting for required entities: {REQUIRED_OBJECTS}"
+                ) from err
+            # Deferred startup path: a ConfigEntryNotReady raised from the
+            # EVENT_HOMEASSISTANT_STARTED listener is swallowed by the event bus
+            # and would leave the entry loaded but empty, so proceed with a
+            # partial setup — entities that are not yet available bind once they
+            # appear.
+            _LOGGER.warning(
+                "Timed out waiting for objects: %s, proceeding with partial setup",
+                REQUIRED_OBJECTS,
+            )
 
         program = IrrigationProgram(
             name=entry.title,

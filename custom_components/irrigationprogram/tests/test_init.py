@@ -135,6 +135,39 @@ async def test_async_setup_entry_raises_when_objects_time_out(
     mock_hass.config_entries.async_forward_entry_setups.assert_not_awaited()
 
 
+async def test_deferred_setup_timeout_proceeds_with_partial_setup(
+    mock_hass, mock_config_entry
+):
+    """On the startup (deferred) path a timeout must NOT raise.
+
+    A ConfigEntryNotReady raised from the EVENT_HOMEASSISTANT_STARTED listener
+    is swallowed by the event bus and would leave the entry loaded-but-empty,
+    so the deferred path proceeds with a partial setup instead.
+    """
+    mock_hass.is_running = False
+    captured = {}
+    mock_hass.bus.async_listen_once = MagicMock(
+        side_effect=lambda event, cb: captured.__setitem__("cb", cb)
+    )
+
+    result = await async_setup_entry(mock_hass, mock_config_entry)
+    assert result is True
+    assert mock_config_entry.runtime_data is None  # deferred, not finished yet
+
+    # Fire the deferred finish with a forced timeout; it must not raise.
+    with (
+        patch(
+            "custom_components.irrigationprogram.asyncio.wait_for",
+            side_effect=asyncio.TimeoutError,
+        ),
+        patch("homeassistant.components.persistent_notification.async_create"),
+    ):
+        await captured["cb"](MagicMock())  # the HOMEASSISTANT_STARTED event
+
+    assert mock_config_entry.runtime_data is not None  # partial setup completed
+    mock_hass.config_entries.async_forward_entry_setups.assert_awaited()
+
+
 async def test_irrigation_program_initialization(mock_config_entry):
     """Test IrrigationProgram dataclass initialization."""
     config = {
