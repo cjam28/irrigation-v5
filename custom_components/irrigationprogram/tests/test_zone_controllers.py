@@ -146,6 +146,93 @@ async def test_duration_controller_passes_run_minutes():
     )
 
 
+def _full_hydrawise_zone(state):
+    """A hydrawise zone runnable through the full turn-on path."""
+    zone = _controller_zone("hydrawise", entity_type="valve", zone_entity="valve.z1")
+    zone._zonedata.name = "z1"
+    zone._zonedata.repeat = None
+    zone._pump = None  # skip the pump prelude in async_solenoid_turn_on
+    zone._scheduled = False
+    zone._state = "open"
+    zone._remaining_time = 0
+    zone.hass.bus.async_fire = MagicMock()
+    zone.hass.services.async_call = AsyncMock()
+    zone.check_switch_state = AsyncMock(return_value=state)
+    zone.calc_run_time = AsyncMock(return_value=125)  # -> duration 3 minutes
+    return zone
+
+
+def _zone_property_patches():
+    """The Zone properties async_solenoid_turn_on reads for its event data."""
+    return (
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+        patch.object(Zone, "water", new_callable=PropertyMock, return_value=10),
+        patch.object(Zone, "wait", new_callable=PropertyMock, return_value=0),
+        patch.object(Zone, "repeat", new_callable=PropertyMock, return_value=1),
+    )
+
+
+async def test_hydrawise_start_watering_targets_watering_sensor():
+    """hydrawise.start_watering must target the zone's watering binary_sensor.
+
+    The real HA service is registered on the binary_sensor platform
+    (device_class 'running'); the configured valve entity is not a valid
+    target, so the zone resolves the sibling sensor on the same device.
+    """
+    zone = _full_hydrawise_zone(state=(False, "closed"))
+    registry = MagicMock()
+    registry.async_get.return_value = MagicMock(device_id="dev1")
+    valve_entry = MagicMock(domain="valve", platform="hydrawise")
+    sensor_entry = MagicMock(
+        domain="binary_sensor",
+        platform="hydrawise",
+        device_class=None,
+        original_device_class="running",
+        entity_id="binary_sensor.z1_watering",
+    )
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[valve_entry, sensor_entry],
+        ),
+    ):
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "hydrawise",
+        "start_watering",
+        {ATTR_ENTITY_ID: "binary_sensor.z1_watering", "duration": 3},
+    )
+
+
+async def test_hydrawise_falls_back_to_open_valve_without_watering_sensor():
+    """Without a resolvable watering sensor the zone opens its valve directly.
+
+    The device then runs its app-default duration; the program timer still
+    owns the close via valve.close_valve.
+    """
+    zone = _full_hydrawise_zone(state=(False, "closed"))
+    registry = MagicMock()
+    registry.async_get.return_value = None  # solenoid not in the registry
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+    ):
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "valve", SERVICE_OPEN_VALVE, {ATTR_ENTITY_ID: "valve.z1"}
+    )
+
+
 async def test_submit_cloud_command_switch_entity_uses_turn_on_off():
     """A switch-type cloud entity uses turn_on/turn_off, not open/close."""
     zone = _controller_zone("rainpoint", entity_type="switch", zone_entity="switch.z1")

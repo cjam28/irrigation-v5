@@ -6,6 +6,7 @@ import logging
 import math
 from typing import Any
 
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.components.persistent_notification import async_create, async_dismiss
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.components.switch import SwitchEntity
@@ -17,6 +18,7 @@ from homeassistant.const import (
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util, slugify
 
@@ -1013,13 +1015,14 @@ class Zone(SwitchEntity, RestoreEntity):
         return start_date + timedelta(days=day_diff)
 
     async def _call_duration_controller(
-        self, domain: str, service: str, duration_key: str
+        self, domain: str, service: str, duration_key: str, target: str | None = None
     ) -> None:
         """Start a controller that self-times, passing the V5 run length in minutes.
 
         RAINBIRD, B-Hyve and Hydrawise each expose a service that runs a zone
         for a supplied duration; the device counts down independently so the V5
-        program timer and the device stay in step.
+        program timer and the device stay in step. ``target`` overrides the
+        service's target entity when it is not the zone's solenoid itself.
         """
         duration = await self.calc_run_time(
             repeats_remaining=self.repeat, scheduled=self.scheduled
@@ -1028,8 +1031,34 @@ class Zone(SwitchEntity, RestoreEntity):
         await self.hass.services.async_call(
             domain,
             service,
-            {ATTR_ENTITY_ID: self.solenoid, duration_key: duration},
+            {ATTR_ENTITY_ID: target or self.solenoid, duration_key: duration},
         )
+
+    def _hydrawise_watering_sensor(self) -> str | None:
+        """Entity id of the zone's hydrawise watering (running) binary sensor.
+
+        hydrawise.start_watering is an entity service registered on the
+        binary_sensor platform with device_class 'running'; the valve/switch
+        the zone is configured with is not a valid target, so resolve the
+        sibling sensor on the same device via the entity registry.
+        """
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(self.solenoid)
+        if entry is not None and entry.device_id:
+            for candidate in er.async_entries_for_device(registry, entry.device_id):
+                if candidate.domain != "binary_sensor" or candidate.platform != HYDRAWISE:
+                    continue
+                if (
+                    candidate.device_class or candidate.original_device_class
+                ) == BinarySensorDeviceClass.RUNNING:
+                    return candidate.entity_id
+        _LOGGER.warning(
+            "Could not resolve the hydrawise watering sensor for %s; opening the"
+            " entity directly instead (the device will run its app-default"
+            " duration)",
+            self.solenoid,
+        )
+        return None
 
     def _submit_cloud_command(self, opening: bool) -> None:
         """Queue an open/close for a cloud controller onto its serialized lane.
@@ -1101,10 +1130,18 @@ class Zone(SwitchEntity, RestoreEntity):
                 await self._call_duration_controller(
                     BHYVE, BHYVE_TURN_ON, BHYVE_DURATION
                 )
-            elif self.controller_type == HYDRAWISE:
-                # Hydrawise self-times like B-Hyve; it closes via valve.close_valve
+            elif self.controller_type == HYDRAWISE and (
+                watering_sensor := self._hydrawise_watering_sensor()
+            ):
+                # Hydrawise self-times like B-Hyve, but its start_watering
+                # service targets the zone's watering binary_sensor, not the
+                # configured valve/switch; it closes via valve.close_valve.
+                # With no resolvable sensor, fall through to a plain open.
                 await self._call_duration_controller(
-                    HYDRAWISE, HYDRAWISE_TURN_ON, HYDRAWISE_DURATION
+                    HYDRAWISE,
+                    HYDRAWISE_TURN_ON,
+                    HYDRAWISE_DURATION,
+                    target=watering_sensor,
                 )
             elif self.controller_type == RAINPOINT:
                 # cloud valve: queue the open on the serialized command lane
