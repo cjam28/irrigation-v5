@@ -210,6 +210,73 @@ async def test_hydrawise_start_watering_targets_watering_sensor():
     )
 
 
+async def test_hydrawise_close_issued_despite_stale_closed_state():
+    """A lagging 'closed' state must not skip the close at timer end.
+
+    Hydrawise local state refreshes on cloud polls; skipping the close on
+    stale state would leave the run to the device's own timer only.
+    """
+    zone = _full_hydrawise_zone(state=(False, "closed"))  # stale/lagging
+    with patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"):
+        await zone.async_solenoid_turn_off()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "valve", SERVICE_CLOSE_VALVE, {ATTR_ENTITY_ID: "valve.z1"}
+    )
+
+
+async def test_hydrawise_reopen_issued_despite_stale_open_state():
+    """A repeat's re-open must fire even while stale state still reads open."""
+    zone = _full_hydrawise_zone(state=(True, "open"))  # stale from last rep
+    registry = MagicMock()
+    registry.async_get.return_value = MagicMock(device_id="dev1")
+    sensor_entry = MagicMock(
+        domain="binary_sensor",
+        platform="hydrawise",
+        device_class=None,
+        original_device_class="running",
+        entity_id="binary_sensor.z1_watering",
+    )
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[sensor_entry],
+        ),
+    ):
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "hydrawise",
+        "start_watering",
+        {ATTR_ENTITY_ID: "binary_sensor.z1_watering", "duration": 3},
+    )
+
+
+async def test_generic_optimistic_zone_close_not_gated_by_state():
+    """An F4 optimistic zone also closes regardless of the local state."""
+    zone = _full_hydrawise_zone(state=(False, "closed"))
+    zone._programdata.controller_type = "Generic"
+    zone._zonedata.optimistic = True
+    with patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"):
+        await zone.async_solenoid_turn_off()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "valve", SERVICE_CLOSE_VALVE, {ATTR_ENTITY_ID: "valve.z1"}
+    )
+
+
+async def test_non_optimistic_zone_close_skipped_when_state_reads_closed():
+    """A non-optimistic zone keeps trusting its state and skips the close."""
+    zone = _full_hydrawise_zone(state=(False, "closed"))
+    zone._programdata.controller_type = "Generic"
+    zone._zonedata.optimistic = False
+    await zone.async_solenoid_turn_off()
+    zone.hass.services.async_call.assert_not_awaited()
+
+
 async def test_hydrawise_falls_back_to_open_valve_without_watering_sensor():
     """Without a resolvable watering sensor the zone opens its valve directly.
 

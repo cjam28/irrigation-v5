@@ -215,11 +215,7 @@ class Zone(SwitchEntity, RestoreEntity):
 
     @property
     def uses_command_lane(self) -> bool:
-        """Controllers driven through the serialized lane.
-
-        Their commands are spaced/queued so the local HA state routinely lags
-        the intent; it must not gate whether a solenoid command is issued.
-        """
+        """Controllers whose commands are routed through the serialized lane."""
         return self.controller_type == RAINPOINT
 
     @property
@@ -1116,10 +1112,10 @@ class Zone(SwitchEntity, RestoreEntity):
                 await asyncio.sleep(delay)
 
         check_state, _value = await self.check_switch_state()
-        # lane controllers: the local state lags the queued command, so issue
-        # the open regardless (the lane confirms/retries and re-opening is
-        # idempotent); other controllers only fire when not already on
-        if check_state is False or self.uses_command_lane:
+        # optimistic zones (cloud controllers and the per-zone opt-in) don't
+        # trust the local state to gate actuation: it lags cloud/lane commands
+        # and re-issuing an open is idempotent; others only fire when not on
+        if check_state is False or self.optimistic:
             if self.controller_type == RAINBIRD:
                 # RAINBIRD controller requires a different service call
                 await self._call_duration_controller(
@@ -1174,9 +1170,9 @@ class Zone(SwitchEntity, RestoreEntity):
         """Turn off the device."""
         #if already off do nothing
         check_state, _value = await self.check_switch_state()
-        # lane controllers: never skip the close on local state (it lags the
-        # queued command); closing an already-closed valve is idempotent
-        if check_state is False and not self.uses_command_lane:
+        # optimistic zones: never skip the close on local state (it lags the
+        # cloud/lane); closing an already-closed valve is idempotent
+        if check_state is False and not self.optimistic:
             return
 
         # is it a valve or a switch
