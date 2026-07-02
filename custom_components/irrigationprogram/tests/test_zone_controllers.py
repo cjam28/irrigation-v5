@@ -277,6 +277,37 @@ async def test_non_optimistic_zone_close_skipped_when_state_reads_closed():
     zone.hass.services.async_call.assert_not_awaited()
 
 
+async def test_restart_ensure_off_skipped_when_state_reads_closed():
+    """The restart safety-close must stay state-gated.
+
+    With the optimistic bypass, every zone would queue a close on the shared
+    lane at every HA restart, jamming it for zones x min_spacing and delaying
+    real commands by minutes (observed live: an open delivered 2.5 minutes
+    after its run timer had already expired).
+    """
+    zone = _full_rainpoint_zone(state=(False, "closed"))
+    with patch("custom_components.irrigationprogram.zone.get_lane") as get_lane:
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone._async_ensure_off_after_restart()
+    lane.submit.assert_not_called()
+
+
+async def test_restart_ensure_off_closes_when_state_reads_open():
+    """A zone genuinely left open (or unknown) at restart is still closed."""
+    for state in ((True, "open"), (None, "unknown")):
+        zone = _full_rainpoint_zone(state=state)
+        with (
+            patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+            patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+        ):
+            lane = MagicMock()
+            get_lane.return_value = lane
+            await zone._async_ensure_off_after_restart()
+        lane.submit.assert_called_once()
+        assert lane.submit.call_args[0][2] == SERVICE_CLOSE_VALVE
+
+
 async def test_optimistic_zone_does_not_repeat_the_close():
     """Teardown paths call turn_off more than once; only one close is issued.
 

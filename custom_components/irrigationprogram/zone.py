@@ -165,8 +165,7 @@ class Zone(SwitchEntity, RestoreEntity):
             )
         await self.calc_default_run_time()
         self.async_schedule_update_ha_state()
-        # on reload/restart ensure the zone is off
-        await self.async_solenoid_turn_off()
+        await self._async_ensure_off_after_restart()
 
     @property
     def is_on(self) -> bool:
@@ -1211,6 +1210,19 @@ class Zone(SwitchEntity, RestoreEntity):
         }
         self.hass.bus.async_fire("irrigation_event", event_data)
 
+
+    async def _async_ensure_off_after_restart(self):
+        """Close the zone on reload/restart only when its state says it is on.
+
+        Unlike normal actuation, this stays gated on the local state even for
+        optimistic zones: firing one close per zone at every restart floods
+        the shared command lane (zones x min_spacing of dead time) and delays
+        real commands by minutes.
+        """
+        check_state, _value = await self.check_switch_state()
+        if check_state is False:
+            return
+        await self.async_solenoid_turn_off()
 
     async def async_eco_turn_off(self):
         """Signal the zone to stop."""
