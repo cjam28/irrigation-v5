@@ -68,6 +68,10 @@ from .const import (
     RAINBIRD_DURATION,
     RAINBIRD_TURN_ON,
     RAINPOINT,
+    RAINPOINT_CONFIRM_ATTR,
+    RAINPOINT_IDLE,
+    RAINPOINT_MAX_RUN_MINUTES,
+    RAINPOINT_RUNNING,
     TIME_STR_FORMAT,
 )
 from .command_lane import get_lane
@@ -1058,24 +1062,75 @@ class Zone(SwitchEntity, RestoreEntity):
         )
         return None
 
-    def _submit_cloud_command(self, opening: bool) -> None:
+    def _submit_cloud_command(self, opening: bool) -> bool:
         """Queue an open/close for a cloud controller onto its serialized lane.
 
         The lane (shared per controller type) spaces commands, confirms the
         target reaches its expected state, retries with backoff and
         dead-letters, so a rate-limited or command-dropping cloud account is
-        driven safely.
+        driven safely. Valve commands confirm against the device-truth
+        attribute when the entity reports one — the integration sets the
+        state optimistically on command, so the state alone proves nothing.
+        Returns False when an identical command was already pending.
         """
+        confirm_attr = None
         if self.entity_type == CONST_VALVE:
             domain = CONST_VALVE
             service = SERVICE_OPEN_VALVE if opening else SERVICE_CLOSE_VALVE
-            expected = (CONST_OPEN, CONST_ON) if opening else (CONST_CLOSED, CONST_OFF)
+            expected = (
+                (RAINPOINT_RUNNING, CONST_OPEN, CONST_ON)
+                if opening
+                else (RAINPOINT_IDLE, CONST_CLOSED, CONST_OFF)
+            )
+            confirm_attr = RAINPOINT_CONFIRM_ATTR
         else:
             domain = CONST_SWITCH
             service = SERVICE_TURN_ON if opening else SERVICE_TURN_OFF
             expected = (CONST_ON, CONST_OPEN) if opening else (CONST_OFF, CONST_CLOSED)
-        get_lane(self.hass, self.controller_type).submit(
-            self.solenoid, domain, service, expected
+        return get_lane(self.hass, self.controller_type).submit(
+            self.solenoid, domain, service, expected, confirm_attr=confirm_attr
+        )
+
+    async def _set_rainpoint_device_duration(self) -> None:
+        """Set the cloud valve's own run-duration to cover the computed run.
+
+        RainPoint valves self-close after their per-valve duration setting, so
+        a setting shorter than the V5 run silently under-waters. Resolve the
+        sibling duration number on the valve's device and set it to the run
+        length plus a margin, clamped to the 60-minute maximum the devices
+        accept; the device timer then backstops the V5 close exactly like the
+        hydrawise/rainbird duration services.
+        """
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(self.solenoid)
+        if entry is None or not entry.device_id:
+            return
+        number_entity = None
+        for candidate in er.async_entries_for_device(registry, entry.device_id):
+            if (
+                candidate.domain == "number"
+                and candidate.platform == entry.platform
+                and candidate.entity_id.endswith("_duration")
+            ):
+                number_entity = candidate.entity_id
+                break
+        if number_entity is None:
+            return
+        seconds = await self.calc_run_time(
+            repeats_remaining=self.repeat, scheduled=self.scheduled
+        )
+        minutes = min(math.ceil(seconds / 60) + 1, RAINPOINT_MAX_RUN_MINUTES)
+        state = self.hass.states.get(number_entity)
+        try:
+            current = float(state.state) if state else None
+        except (TypeError, ValueError):
+            current = None
+        if current == float(minutes):
+            return
+        await self.hass.services.async_call(
+            "number",
+            "set_value",
+            {ATTR_ENTITY_ID: number_entity, "value": minutes},
         )
 
     async def async_solenoid_turn_on(self):
@@ -1143,7 +1198,9 @@ class Zone(SwitchEntity, RestoreEntity):
                     target=watering_sensor,
                 )
             elif self.controller_type == RAINPOINT:
-                # cloud valve: queue the open on the serialized command lane
+                # cloud valve: arm the device's own duration backstop, then
+                # queue the open on the serialized command lane
+                await self._set_rainpoint_device_duration()
                 self._submit_cloud_command(opening=True)
             elif self.entity_type == CONST_VALVE:
                 # valve
@@ -1481,6 +1538,60 @@ class Zone(SwitchEntity, RestoreEntity):
         await self.remaining_time_set()
         await self.async_turn_off_zone_natural()
 
+    async def _handle_unexpected_run_state(self, status, warning_issued: bool) -> bool:
+        """React when the solenoid state has not matched for latency seconds.
+
+        Lane zones re-arm: the device may have closed itself mid-run (its own
+        duration timer, an app/manual close, a hub drop) while the run timer
+        still owns the zone, so re-issue the open — the lane collapses
+        duplicate pending opens, making this safe to call every monitor
+        cycle. Other optimistic zones ignore the state by design.
+        Non-optimistic zones keep the upstream notify/terminate behaviour.
+        Returns the updated warning_issued flag.
+        """
+        if self.uses_command_lane:
+            if self._submit_cloud_command(opening=True):
+                _LOGGER.warning(
+                    "%s reads %s mid-run; re-arming the open through the lane",
+                    self.name,
+                    status,
+                )
+                self.hass.bus.async_fire(
+                    "irrigation_event",
+                    {
+                        "action": "zone_rearmed",
+                        "device_id": self.solenoid,
+                        "zone": self.name,
+                        "state": status,
+                    },
+                )
+            return warning_issued
+        if self.optimistic:
+            # optimistic zones fire once and run on the timer; an
+            # unconfirmed state is expected and must not terminate them
+            return warning_issued
+        if not warning_issued:
+            async_dismiss(self.hass, "irrigation_latency")
+            async_create(
+                self.hass,
+                message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
+                title="Irrigation Controller",
+                notification_id="irrigation_latency",
+            )
+        event_data = {
+            "action": "error",
+            "error": "Returned an unexpected state",
+            "device_id": self.entity_id,
+            "scheduled": self._scheduled,
+            "program": self.name,
+            "state": status,
+        }
+        self.hass.bus.async_fire("irrigation_event", event_data)
+        if not self._continue_on_unexpected_state:
+            # if the zone is not on, but the state is not what we expect, terminate the zone
+            await self.async_turn_off_zone_natural()
+        return True
+
     async def time(self, water_adjust_value:float, seconds_run:int, reps:int, last=False):
         """Track watering time based on time."""
         warning_issued = False
@@ -1555,30 +1666,9 @@ class Zone(SwitchEntity, RestoreEntity):
                     continue
                 break
             else:
-                if not self.optimistic:
-                    # optimistic zones fire once and run on the timer; an
-                    # unconfirmed state is expected and must not terminate them
-                    if not warning_issued:
-                        async_dismiss(self.hass, "irrigation_latency")
-                        async_create(
-                            self.hass,
-                            message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
-                            title="Irrigation Controller",
-                            notification_id="irrigation_latency",
-                        )
-                    warning_issued = True
-                    event_data = {
-                        "action": "error",
-                        "error": "Returned an unexpected state",
-                        "device_id": self.entity_id,
-                        "scheduled": self._scheduled,
-                        "program": self.name,
-                        "state": status,
-                    }
-                    self.hass.bus.async_fire("irrigation_event", event_data)
-                    if not self._continue_on_unexpected_state:
-                        # if the zone is not on, but the state is not what we expect, terminate the zone
-                        await self.async_turn_off_zone_natural()
+                warning_issued = await self._handle_unexpected_run_state(
+                    status, warning_issued
+                )
 
         return seconds_run
 
@@ -1655,30 +1745,9 @@ class Zone(SwitchEntity, RestoreEntity):
                     continue
                 break
             else:
-                if not self.optimistic:
-                    # optimistic zones fire once and run on the timer; an
-                    # unconfirmed state is expected and must not terminate them
-                    if not warning_issued:
-                        async_dismiss(self.hass, "irrigation_latency")
-                        async_create(
-                            self.hass,
-                            message=f"{self.name} returned an unexpected state, {status} for {self._latency} seconds.",
-                            title="Irrigation Controller",
-                            notification_id="irrigation_latency",
-                        )
-                    warning_issued = True
-                    event_data = {
-                        "action": "error",
-                        "error": "Returned an unexpected state",
-                        "device_id": self.entity_id,
-                        "scheduled": self._scheduled,
-                        "program": self.name,
-                        "state": status,
-                    }
-                    self.hass.bus.async_fire("irrigation_event", event_data)
-                    if not self._continue_on_unexpected_state:
-                        # if the zone is not on, but the state is not what we expect, terminate the zone
-                        await self.async_turn_off_zone_natural()
+                warning_issued = await self._handle_unexpected_run_state(
+                    status, warning_issued
+                )
 
             # If no flow for 5 cycles, shut off, possible flow sensor has failed
             if self.flow_sensor == 0:

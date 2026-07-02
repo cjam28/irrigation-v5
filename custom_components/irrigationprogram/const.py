@@ -15,6 +15,14 @@ HYDRAWISE = "hydrawise"
 HYDRAWISE_DURATION = "duration"
 
 RAINPOINT = "rainpoint"
+# RainPoint valves run each open for their own per-valve duration setting and
+# reject opens longer than 60 minutes outright; the device-truth attribute
+# below reports what the valve is actually doing, while the integration's
+# state is set optimistically on command.
+RAINPOINT_MAX_RUN_MINUTES = 60
+RAINPOINT_CONFIRM_ATTR = "valve_state"
+RAINPOINT_RUNNING = "irrigation"
+RAINPOINT_IDLE = "idle"
 
 # Serialized command lane defaults for cloud-backed controllers. Cloud valve
 # integrations often accept only one command per account at a time and may

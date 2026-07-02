@@ -45,6 +45,11 @@ class _Command:
     service: str
     expected_states: tuple[str, ...]
     data: dict[str, Any] = field(default_factory=dict)
+    # confirm against this entity attribute when the entity reports it
+    # (device truth); integrations that set the state optimistically on
+    # command make the plain state useless for confirmation
+    confirm_attr: str | None = None
+    seq: int = 0
 
 
 class CommandLane:
@@ -75,6 +80,9 @@ class CommandLane:
         self._queue: asyncio.Queue[_Command] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._last_ts: float | None = None
+        self._seq = 0
+        # newest pending (service, seq) per entity, for consecutive-dup dedup
+        self._tail: dict[str, tuple[str, int]] = {}
         self.dead_letters: list[_Command] = []
 
     def submit(
@@ -84,13 +92,34 @@ class CommandLane:
         service: str,
         expected_states: Sequence[str],
         data: dict[str, Any] | None = None,
-    ) -> None:
-        """Enqueue a command; start the worker if it is not running. Non-blocking."""
+        confirm_attr: str | None = None,
+    ) -> bool:
+        """Enqueue a command; start the worker if it is not running. Non-blocking.
+
+        A command identical in service to the entity's newest still-pending
+        command is dropped (returns False): callers (teardown paths, the
+        re-arm keepalive) may re-submit freely without flooding the lane.
+        Alternating sequences (open, close, open) are never deduplicated.
+        """
+        tail = self._tail.get(entity_id)
+        if tail is not None and tail[0] == service:
+            return False
+        self._seq += 1
+        self._tail[entity_id] = (service, self._seq)
         self._queue.put_nowait(
-            _Command(entity_id, domain, service, tuple(expected_states), data or {})
+            _Command(
+                entity_id,
+                domain,
+                service,
+                tuple(expected_states),
+                data or {},
+                confirm_attr,
+                self._seq,
+            )
         )
         if self._worker is None or self._worker.done():
             self._worker = self.hass.async_create_task(self._worker_loop())
+        return True
 
     async def wait_idle(self) -> None:
         """Wait until the queue has drained (test/utility helper)."""
@@ -109,6 +138,9 @@ class CommandLane:
                     cmd.entity_id,
                 )
             finally:
+                tail = self._tail.get(cmd.entity_id)
+                if tail is not None and tail[1] == cmd.seq:
+                    del self._tail[cmd.entity_id]
                 self._queue.task_done()
 
     async def _deliver(self, cmd: _Command) -> bool:
@@ -154,12 +186,23 @@ class CommandLane:
         self._last_ts = now
 
     async def _confirm(self, cmd: _Command) -> bool:
-        """Poll the target entity until it reports an expected state or times out."""
+        """Poll the target entity until it reports an expected state or times out.
+
+        When ``confirm_attr`` is set and the entity carries that attribute, the
+        attribute value is the confirmation truth (integrations that set the
+        state optimistically on command make the plain state meaningless);
+        entities without the attribute fall back to the state.
+        """
         deadline = self._clock() + self._confirm_timeout
         while True:
             state = self.hass.states.get(cmd.entity_id)
-            if state is not None and state.state in cmd.expected_states:
-                return True
+            if state is not None:
+                if cmd.confirm_attr and cmd.confirm_attr in state.attributes:
+                    value = state.attributes[cmd.confirm_attr]
+                else:
+                    value = state.state
+                if value in cmd.expected_states:
+                    return True
             if self._clock() >= deadline:
                 return False
             await self._sleep(self._poll_interval)

@@ -382,6 +382,226 @@ async def test_hydrawise_falls_back_to_open_valve_without_watering_sensor():
     )
 
 
+def _rainpoint_registry(with_number=True):
+    """Mock entity registry: rainpoint valve + sibling homgar duration number."""
+    registry = MagicMock()
+    valve_entry = MagicMock(device_id="dev1", platform="homgar")
+    registry.async_get.return_value = valve_entry
+    entries = []
+    if with_number:
+        number_entry = MagicMock(
+            domain="number",
+            platform="homgar",
+            entity_id="number.z1_duration",
+        )
+        entries.append(number_entry)
+    other = MagicMock(domain="sensor", platform="homgar", entity_id="sensor.z1_x")
+    entries.append(other)
+    return registry, entries
+
+
+async def test_rainpoint_sets_device_duration_before_open():
+    """The valve's own run-duration is set to cover the computed run.
+
+    RainPoint valves self-close after their per-valve duration; shorter than
+    the V5 run means silent under-watering (observed live: 75-min runs cut at
+    the valve's 60/40-min settings).
+    """
+    zone = _full_rainpoint_zone(state=(False, "closed"))
+    zone._zonedata.repeat = None
+    zone._scheduled = False
+    zone.calc_run_time = AsyncMock(return_value=19 * 60)  # 19 min run
+    zone.hass.services.async_call = AsyncMock()
+    dur_state = MagicMock()
+    dur_state.state = "60.0"
+    zone.hass.states.get.return_value = dur_state
+    registry, entries = _rainpoint_registry()
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=entries,
+        ),
+    ):
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "number", "set_value", {ATTR_ENTITY_ID: "number.z1_duration", "value": 20}
+    )
+    lane.submit.assert_called_once()
+
+
+async def test_rainpoint_duration_set_skipped_when_already_right():
+    """No cloud call when the valve's duration already matches the target."""
+    zone = _full_rainpoint_zone(state=(False, "closed"))
+    zone._zonedata.repeat = None
+    zone._scheduled = False
+    zone.calc_run_time = AsyncMock(return_value=19 * 60)
+    zone.hass.services.async_call = AsyncMock()
+    dur_state = MagicMock()
+    dur_state.state = "20.0"  # already the target
+    zone.hass.states.get.return_value = dur_state
+    registry, entries = _rainpoint_registry()
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=entries,
+        ),
+    ):
+        get_lane.return_value = MagicMock()
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_not_awaited()
+
+
+async def test_rainpoint_duration_clamped_to_device_max():
+    """Durations above the 60-minute device maximum are clamped, not sent.
+
+    The devices reject opens with duration > 60 min outright (observed live:
+    such opens are logged as bare 'Closed()' and nothing waters).
+    """
+    zone = _full_rainpoint_zone(state=(False, "closed"))
+    zone._zonedata.repeat = None
+    zone._scheduled = False
+    zone.calc_run_time = AsyncMock(return_value=90 * 60)  # 90-min run
+    zone.hass.services.async_call = AsyncMock()
+    dur_state = MagicMock()
+    dur_state.state = "40.0"
+    zone.hass.states.get.return_value = dur_state
+    registry, entries = _rainpoint_registry()
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=entries,
+        ),
+    ):
+        get_lane.return_value = MagicMock()
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_awaited_once_with(
+        "number", "set_value", {ATTR_ENTITY_ID: "number.z1_duration", "value": 60}
+    )
+
+
+async def test_rainpoint_open_submitted_without_duration_number():
+    """A rainpoint valve with no resolvable duration number still opens."""
+    zone = _full_rainpoint_zone(state=(False, "closed"))
+    zone.hass.services.async_call = AsyncMock()
+    registry, _ = _rainpoint_registry(with_number=False)
+    registry.async_get.return_value = None  # not even in the registry
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+    ):
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone.async_solenoid_turn_on()
+    zone.hass.services.async_call.assert_not_awaited()
+    lane.submit.assert_called_once()
+
+
+async def test_rainpoint_valve_confirms_against_device_truth():
+    """Valve commands confirm on the device-truth attribute, not the state.
+
+    homgar sets the state optimistically on command, so state=='open' proves
+    nothing (observed live: a dead hub 'watered' on paper for 75 minutes).
+    """
+    zone = _controller_zone("rainpoint", entity_type="valve")
+    with patch("custom_components.irrigationprogram.zone.get_lane") as get_lane:
+        lane = MagicMock()
+        get_lane.return_value = lane
+        zone._submit_cloud_command(opening=True)
+        open_kwargs = lane.submit.call_args.kwargs
+        open_expected = lane.submit.call_args[0][3]
+        zone._submit_cloud_command(opening=False)
+        close_kwargs = lane.submit.call_args.kwargs
+        close_expected = lane.submit.call_args[0][3]
+    assert open_kwargs["confirm_attr"] == "valve_state"
+    assert "irrigation" in open_expected
+    assert close_kwargs["confirm_attr"] == "valve_state"
+    assert "idle" in close_expected
+
+
+# --- re-arm: device/hub closed the valve while the run timer owns it -------
+
+def _unexpected_state_zone(controller, optimistic=False):
+    zone = _controller_zone(controller, entity_type="valve", zone_entity="valve.z1")
+    zone._zonedata.optimistic = optimistic
+    zone._scheduled = False
+    zone._latency = 5
+    zone._continue_on_unexpected_state = False
+    zone.hass.bus.async_fire = MagicMock()
+    zone.async_turn_off_zone_natural = AsyncMock()
+    return zone
+
+
+async def test_lane_zone_rearms_when_device_closed_mid_run():
+    """A lane zone whose device closed mid-run re-issues the open."""
+    zone = _unexpected_state_zone("rainpoint")
+    with (
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+    ):
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone._handle_unexpected_run_state("closed", warning_issued=False)
+    lane.submit.assert_called_once()
+    assert lane.submit.call_args[0][2] == SERVICE_OPEN_VALVE
+    zone.async_turn_off_zone_natural.assert_not_awaited()
+
+
+async def test_optimistic_non_lane_zone_ignores_unexpected_state():
+    """Optimistic non-lane zones (hydrawise) neither notify nor terminate."""
+    zone = _unexpected_state_zone("hydrawise")
+    with patch("custom_components.irrigationprogram.zone.get_lane") as get_lane:
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone._handle_unexpected_run_state("closed", warning_issued=False)
+    lane.submit.assert_not_called()
+    zone.async_turn_off_zone_natural.assert_not_awaited()
+    zone.hass.bus.async_fire.assert_not_called()
+
+
+async def test_non_optimistic_zone_keeps_notify_and_terminate():
+    """Non-optimistic zones keep the upstream warn/terminate behaviour."""
+    zone = _unexpected_state_zone("Generic")
+    with (
+        patch("custom_components.irrigationprogram.zone.async_create") as notify,
+        patch("custom_components.irrigationprogram.zone.async_dismiss"),
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+    ):
+        zone.entity_id = "switch.z1"
+        result = await zone._handle_unexpected_run_state("off", warning_issued=False)
+    notify.assert_called_once()
+    zone.hass.bus.async_fire.assert_called_once()
+    zone.async_turn_off_zone_natural.assert_awaited_once()
+    assert result is True
+
+
 async def test_submit_cloud_command_switch_entity_uses_turn_on_off():
     """A switch-type cloud entity uses turn_on/turn_off, not open/close."""
     zone = _controller_zone("rainpoint", entity_type="switch", zone_entity="switch.z1")

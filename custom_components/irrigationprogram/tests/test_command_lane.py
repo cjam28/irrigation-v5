@@ -184,6 +184,115 @@ async def test_submit_during_delivery_is_processed():
     assert delivered == ["valve.z1", "valve.z2"]
 
 
+async def test_confirm_uses_attribute_when_requested():
+    """With confirm_attr set, the entity attribute is the confirmation truth.
+
+    Cloud integrations may set the state optimistically on command, so
+    state == 'open' proves nothing; a device-truth attribute (e.g. homgar's
+    valve_state == 'irrigation') only changes when the device really ran.
+    """
+    hass = _hass()
+    st = MagicMock()
+    st.state = "open"  # optimistic echo
+    st.attributes = {"valve_state": "irrigation"}  # device truth
+    hass.states.get.return_value = st
+    lane = _lane(hass)
+    lane.submit(
+        "valve.z1", "valve", "open_valve",
+        ("irrigation", "open", "on"),
+        confirm_attr="valve_state",
+    )
+    await lane.wait_idle()
+    assert hass.services.async_call.await_count == 1
+    assert lane.dead_letters == []
+
+
+async def test_confirm_attr_rejects_optimistic_state_echo():
+    """Optimistic state 'open' with device-truth 'idle' must NOT confirm."""
+    hass = _hass()
+    st = MagicMock()
+    st.state = "open"  # optimistic echo from the integration
+    st.attributes = {"valve_state": "idle"}  # device never ran
+    hass.states.get.return_value = st
+    lane = _lane(hass, max_attempts=2)
+    lane.submit(
+        "valve.z1", "valve", "open_valve",
+        ("irrigation", "open", "on"),
+        confirm_attr="valve_state",
+    )
+    await lane.wait_idle()
+    assert hass.services.async_call.await_count == 2  # retried
+    assert len(lane.dead_letters) == 1  # and surfaced
+
+
+async def test_confirm_attr_falls_back_to_state_when_absent():
+    """Entities without the attribute keep legacy state-based confirmation."""
+    hass = _hass()
+    st = MagicMock()
+    st.state = "open"
+    st.attributes = {}
+    hass.states.get.return_value = st
+    lane = _lane(hass)
+    lane.submit(
+        "valve.z1", "valve", "open_valve",
+        ("irrigation", "open", "on"),
+        confirm_attr="valve_state",
+    )
+    await lane.wait_idle()
+    assert hass.services.async_call.await_count == 1
+    assert lane.dead_letters == []
+
+
+async def test_identical_pending_command_is_deduplicated():
+    """Re-submitting a command identical to the newest pending one is a no-op.
+
+    The re-arm keepalive may re-submit an open every monitor cycle; only one
+    may be queued at a time or the lane floods.
+    """
+    hass = _hass(state_value="open")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated(domain, service, data):
+        started.set()
+        await release.wait()
+
+    hass.services.async_call = AsyncMock(side_effect=gated)
+    lane = _lane(hass)
+    lane.submit("valve.z1", "valve", "open_valve", ("open",))
+    await started.wait()  # first command mid-delivery
+    lane.submit("valve.z2", "valve", "open_valve", ("open",))
+    lane.submit("valve.z2", "valve", "open_valve", ("open",))  # dup: dropped
+    lane.submit("valve.z2", "valve", "open_valve", ("open",))  # dup: dropped
+    release.set()
+    await lane.wait_idle()
+    assert hass.services.async_call.await_count == 2  # z1 + one z2
+
+
+async def test_open_close_open_alternation_is_not_deduplicated():
+    """Only consecutive identical commands dedup; sequences stay intact."""
+    hass = _hass(state_value="open")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated(domain, service, data):
+        started.set()
+        await release.wait()
+
+    hass.services.async_call = AsyncMock(side_effect=gated)
+    lane = _lane(hass)
+    lane.submit("valve.z1", "valve", "open_valve", ("open",))
+    await started.wait()
+    lane.submit("valve.z2", "valve", "open_valve", ("open",))
+    # confirm-state 'open' keeps the mock confirming every command; the test
+    # is about queueing, not confirmation
+    lane.submit("valve.z2", "valve", "close_valve", ("open",))
+    lane.submit("valve.z2", "valve", "open_valve", ("open",))  # legit re-open
+    release.set()
+    await lane.wait_idle()
+    assert hass.services.async_call.await_count == 4
+
+
 async def test_dead_letters_are_capped():
     """The dead-letter list keeps only the most recent entries."""
     hass = _hass(state_value="closed")  # never confirms
