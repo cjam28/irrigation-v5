@@ -277,6 +277,57 @@ async def test_non_optimistic_zone_close_skipped_when_state_reads_closed():
     zone.hass.services.async_call.assert_not_awaited()
 
 
+async def test_optimistic_zone_does_not_repeat_the_close():
+    """Teardown paths call turn_off more than once; only one close is issued.
+
+    The program end fires async_solenoid_turn_off from both the run-loop
+    unwind and the cleanup path; commands are idempotent but each duplicate
+    burns a cloud/lane slot (observed live: double close per zone end).
+    """
+    zone = _full_hydrawise_zone(state=(False, "closed"))
+    with patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"):
+        await zone.async_solenoid_turn_off()
+        await zone.async_solenoid_turn_off()
+    assert zone.hass.services.async_call.await_count == 1
+
+
+async def test_optimistic_zone_reopen_after_close_still_fires():
+    """Open→close→open alternation (eco repeats) is never suppressed."""
+    zone = _full_hydrawise_zone(state=(False, "closed"))
+    registry = MagicMock()
+    registry.async_get.return_value = MagicMock(device_id="dev1")
+    sensor_entry = MagicMock(
+        domain="binary_sensor",
+        platform="hydrawise",
+        device_class=None,
+        original_device_class="running",
+        entity_id="binary_sensor.z1_watering",
+    )
+    name_p, water_p, wait_p, repeat_p = _zone_property_patches()
+    with (
+        name_p, water_p, wait_p, repeat_p,
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=registry,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[sensor_entry],
+        ),
+    ):
+        await zone.async_solenoid_turn_on()
+        await zone.async_solenoid_turn_off()
+        await zone.async_solenoid_turn_on()
+        await zone.async_solenoid_turn_off()
+    services = [c.args[1] for c in zone.hass.services.async_call.await_args_list]
+    assert services == [
+        "start_watering",
+        SERVICE_CLOSE_VALVE,
+        "start_watering",
+        SERVICE_CLOSE_VALVE,
+    ]
+
+
 async def test_hydrawise_falls_back_to_open_valve_without_watering_sensor():
     """Without a resolvable watering sensor the zone opens its valve directly.
 

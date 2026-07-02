@@ -84,6 +84,9 @@ class Zone(SwitchEntity, RestoreEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "zone"
     _unrecorded_attributes = frozenset({MATCH_ALL})
+    # last solenoid command issued ("open"/"close"); dedups the extra close the
+    # teardown paths fire for optimistic zones, where local state cannot gate
+    _solenoid_commanded: str | None = None
 
     def __init__(
         self,
@@ -1116,6 +1119,7 @@ class Zone(SwitchEntity, RestoreEntity):
         # trust the local state to gate actuation: it lags cloud/lane commands
         # and re-issuing an open is idempotent; others only fire when not on
         if check_state is False or self.optimistic:
+            self._solenoid_commanded = "open"
             if self.controller_type == RAINBIRD:
                 # RAINBIRD controller requires a different service call
                 await self._call_duration_controller(
@@ -1174,6 +1178,11 @@ class Zone(SwitchEntity, RestoreEntity):
         # cloud/lane); closing an already-closed valve is idempotent
         if check_state is False and not self.optimistic:
             return
+        if self.optimistic and self._solenoid_commanded == "close":
+            # the teardown paths call turn_off more than once per stop; one
+            # close per open is enough and duplicates burn a cloud/lane slot
+            return
+        self._solenoid_commanded = "close"
 
         # is it a valve or a switch
         if self.controller_type == BHYVE:
