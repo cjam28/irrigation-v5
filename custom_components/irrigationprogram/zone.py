@@ -1549,6 +1549,12 @@ class Zone(SwitchEntity, RestoreEntity):
         Non-optimistic zones keep the upstream notify/terminate behaviour.
         Returns the updated warning_issued flag.
         """
+        if status == CONST_ADJUSTED_OFF:
+            # A wilting->growing transition mid-run drops the adjustment to 0,
+            # flipping the live status to adjusted_off; the device has not
+            # closed the valve. Neither re-arm the lane nor terminate the zone
+            # — let the run finish on its start-sampled duration.
+            return warning_issued
         if self.uses_command_lane:
             if self._submit_cloud_command(opening=True):
                 _LOGGER.warning(

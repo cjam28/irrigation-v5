@@ -602,6 +602,40 @@ async def test_non_optimistic_zone_keeps_notify_and_terminate():
     assert result is True
 
 
+async def test_lane_zone_does_not_rearm_on_adjusted_off():
+    """A wilting->growing transition mid-run must not re-arm the lane.
+
+    The adjustment dropping to 0 makes the live status 'adjusted_off'; the
+    device did not close the valve, so re-issuing the open every monitor
+    cycle just spams the cloud (observed: 74 re-arms in one evening run).
+    The run finishes on its start-sampled duration instead.
+    """
+    zone = _unexpected_state_zone("rainpoint")
+    with (
+        patch("custom_components.irrigationprogram.zone.get_lane") as get_lane,
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+    ):
+        lane = MagicMock()
+        get_lane.return_value = lane
+        await zone._handle_unexpected_run_state("adjusted_off", warning_issued=False)
+    lane.submit.assert_not_called()
+    zone.async_turn_off_zone_natural.assert_not_awaited()
+
+
+async def test_non_optimistic_zone_not_terminated_on_adjusted_off():
+    """A wilting->growing transition mid-run must not terminate the zone."""
+    zone = _unexpected_state_zone("Generic")
+    with (
+        patch("custom_components.irrigationprogram.zone.async_create") as notify,
+        patch("custom_components.irrigationprogram.zone.async_dismiss"),
+        patch.object(Zone, "name", new_callable=PropertyMock, return_value="z1"),
+    ):
+        zone.entity_id = "switch.z1"
+        await zone._handle_unexpected_run_state("adjusted_off", warning_issued=False)
+    notify.assert_not_called()
+    zone.async_turn_off_zone_natural.assert_not_awaited()
+
+
 async def test_submit_cloud_command_switch_entity_uses_turn_on_off():
     """A switch-type cloud entity uses turn_on/turn_off, not open/close."""
     zone = _controller_zone("rainpoint", entity_type="switch", zone_entity="switch.z1")
