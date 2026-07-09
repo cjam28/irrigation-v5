@@ -377,10 +377,16 @@ class EnableRainDelay(SwitchEntity, RestoreEntity):
         last_state = await self.async_get_last_state()
         if last_state is None:
             self._state = "off"
+            self._last_updated = dt_util.utcnow()
         else:
             self._state = last_state.state
-        #self._state = "off"
-        self._last_updated = dt_util.utcnow()
+            # last_updated anchors the delay expiry calculated elsewhere
+            # (zone.py: delay_until = rain_delay.last_updated + delay days).
+            # Resetting it to "now" on every restart would silently extend
+            # an in-progress rain delay by however long HA had been up
+            # before the restart, potentially never expiring across
+            # frequent restarts - restore the real toggle time instead.
+            self._last_updated = last_state.last_updated
         self.async_schedule_update_ha_state()
 
     @property

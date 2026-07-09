@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from custom_components.irrigationprogram import (
     IrrigationData,
@@ -190,6 +192,47 @@ def test_enable_rain_delay_switch():
     assert switch._attr_translation_key == "enable_rain_delay"
     assert switch._attr_has_entity_name is True
     assert switch.is_on is False
+
+
+async def test_enable_rain_delay_restores_last_updated_not_now():
+    """A restart must not reset the delay-expiry anchor to "now".
+
+    zone.py computes delay_until = rain_delay.last_updated + delay days. If a
+    restored "on" state reset last_updated to utcnow() instead of the actual
+    toggle time, every restart during an active rain delay would silently
+    push the expiry back out, risking a delay that never clears.
+    """
+    switch = EnableRainDelay("test_id", "Test Program")
+
+    original_toggle_time = dt_util.utcnow() - timedelta(days=2)
+    last_state = MagicMock()
+    last_state.state = "on"
+    last_state.last_updated = original_toggle_time
+
+    with (
+        patch.object(switch, "async_get_last_state", return_value=last_state),
+        patch.object(switch, "async_schedule_update_ha_state"),
+    ):
+        await switch.async_added_to_hass()
+
+    assert switch.is_on is True
+    assert switch.last_updated == original_toggle_time
+
+
+async def test_enable_rain_delay_first_setup_uses_now():
+    """With no prior state (first-ever setup), last_updated defaults to now."""
+    switch = EnableRainDelay("test_id", "Test Program")
+
+    before = dt_util.utcnow()
+    with (
+        patch.object(switch, "async_get_last_state", return_value=None),
+        patch.object(switch, "async_schedule_update_ha_state"),
+    ):
+        await switch.async_added_to_hass()
+    after = dt_util.utcnow()
+
+    assert switch.is_on is False
+    assert before <= switch.last_updated <= after
 
 
 def test_enable_zone_switch():
