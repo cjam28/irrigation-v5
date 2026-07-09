@@ -15,11 +15,19 @@ HYDRAWISE = "hydrawise"
 HYDRAWISE_DURATION = "duration"
 
 RAINPOINT = "rainpoint"
-# RainPoint valves run each open for their own per-valve duration setting and
-# reject opens longer than 60 minutes outright; the device-truth attribute
-# below reports what the valve is actually doing, while the integration's
-# state is set optimistically on command.
-RAINPOINT_MAX_RUN_MINUTES = 60
+# RainPoint valves run each open for their own per-valve duration setting; the
+# device-truth attribute below reports what the valve is actually doing, while
+# the integration's state is set optimistically on command.
+#
+# The per-open duration written to the valve is min(ceil(run/60)+1, this cap).
+# Keep the cap ABOVE the largest schedulable run (program water_max) so the
+# +1-minute margin is never clamped away — if it is, the device self-closes
+# right when the V5 run timer is still active and the zone re-arms into a
+# second segment (observed 2026-07-08: a 60-min Pool Entry run split into
+# 60+60). Owner-verified 2026-07-09 that RainPoint devices DO accept opens
+# >60 min (contrary to an earlier assumption), so this is raised 60 -> 240
+# (2x the current water_max of 120; homgar integration itself allows 720).
+RAINPOINT_MAX_RUN_MINUTES = 240
 RAINPOINT_CONFIRM_ATTR = "valve_state"
 RAINPOINT_RUNNING = "irrigation"
 RAINPOINT_IDLE = "idle"
