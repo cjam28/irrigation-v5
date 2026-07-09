@@ -146,6 +146,7 @@ class IrrigationProgram:
     unique_id: str
     config: Any|SwitchEntity
     start_time: Any|TimeEntity  # generated
+    delay_time: Any|SensorEntity  # generated
     remaining_time: Any|SensorEntity  # generated
     default_run_time: Any|SensorEntity
     multitime: Any|TextEntity  # generated
@@ -238,6 +239,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             unique_id=entry.entry_id,
             config=None,
             start_time=None,
+            delay_time=None,
             remaining_time=None,
             default_run_time=None,
             multitime=None,
@@ -284,6 +286,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug(msg)
 
         zone_data = []
+        msg_parts = []
         for zone in config.get(ATTR_ZONES,[]):
             z = IrrigationZoneData(
                 zone=zone.get(ATTR_ZONE),
@@ -310,7 +313,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 adjustment=zone.get(ATTR_WATER_ADJUST),
                 flow_rate=None,
             )
-            msg_parts = []
             state = hass.states.get(z.zone)
             if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
                 msg_parts.append(f"ERROR {z.zone} has not initialised before the Irrigation Program, this could be a slow registering device, try increasing the 'Wait time from devices that load slowly on startup' setting in the advanced options.")
@@ -324,13 +326,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state = hass.states.get(z.rain_sensor)
                 if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
                     msg_parts.append(f"Warning, {z.rain_sensor} has not initialised before irrigation program, check your configuration")
-            if msg_parts:
-                async_create(
-                    hass,
-                    message="\n".join(msg_parts),
-                    title="Irrigation Controller",
-                    notification_id="irrigation_device_error",
-                )
+
+        if msg_parts:
+            async_create(
+                hass,
+                message="\n".join(msg_parts),
+                title="Irrigation Controller",
+                notification_id="irrigation_device_error",
+            )
 
         entry.runtime_data = IrrigationData(program, zone_data)
 
@@ -386,6 +389,7 @@ def exclude(hass: HomeAssistant):
                     p.start_time.entity_id,
                     p.remaining_time.entity_id,
                     p.default_run_time.entity_id,
+                    p.delay_time.entity_id,
                 ]
             )
             if p.inter_zone_delay:

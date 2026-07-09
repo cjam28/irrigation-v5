@@ -67,6 +67,7 @@ def mock_config_entry():
             unique_id="test_id",
             config=None,
             start_time=None,
+            delay_time=None,
             remaining_time=None,
             default_run_time=None,
             multitime=None,

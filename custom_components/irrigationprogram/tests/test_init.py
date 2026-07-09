@@ -175,7 +175,16 @@ async def test_deferred_partial_setup_survives_missing_zone_entities(
 
     The missing-entity notification path is the whole point of partial setup;
     it must raise the notification and still bind the program, not crash.
+    Every missing zone must be reported in a single aggregated notification -
+    a shared notification_id means a per-zone notification would leave only the
+    last zone visible.
     """
+    zone2 = dict(mock_config_entry.options[ATTR_ZONES][0])
+    zone2[ATTR_ZONE] = "switch.zone2"
+    mock_config_entry.options = {
+        **mock_config_entry.options,
+        ATTR_ZONES: [mock_config_entry.options[ATTR_ZONES][0], zone2],
+    }
     mock_hass.is_running = False
     mock_hass.states.get.return_value = None  # nothing has loaded yet
     captured = {}
@@ -197,7 +206,9 @@ async def test_deferred_partial_setup_survives_missing_zone_entities(
     assert mock_config_entry.runtime_data is not None
     mock_hass.config_entries.async_forward_entry_setups.assert_awaited()
     notify.assert_called_once()
-    assert "switch.zone1" in notify.call_args.kwargs["message"]
+    message = notify.call_args.kwargs["message"]
+    assert "switch.zone1" in message
+    assert "switch.zone2" in message
 
 
 async def test_deferred_partial_setup_survives_missing_zone_sensors(
@@ -271,6 +282,7 @@ async def test_irrigation_program_initialization(mock_config_entry):
         unique_id="test_unique_id",
         config=None,
         start_time=None,
+        delay_time=None,
         remaining_time=None,
         default_run_time=None,
         multitime=None,
@@ -399,6 +411,7 @@ async def test_irrigation_data_structure(mock_config_entry):
         unique_id="test_id",
         config=None,
         start_time=None,
+        delay_time=None,
         remaining_time=None,
         default_run_time=None,
         multitime=None,
@@ -479,6 +492,8 @@ def test_exclude_function(mock_hass):
     mock_entry1.runtime_data.program.remaining_time.entity_id = "sensor.program1_remaining"
     mock_entry1.runtime_data.program.default_run_time = MagicMock()
     mock_entry1.runtime_data.program.default_run_time.entity_id = "sensor.program1_default"
+    mock_entry1.runtime_data.program.delay_time = MagicMock()
+    mock_entry1.runtime_data.program.delay_time.entity_id = "sensor.program1_delay_time"
     mock_entry1.runtime_data.program.inter_zone_delay = None
     mock_entry1.runtime_data.program.frequency = None
     mock_entry1.runtime_data.program.repeat = False
@@ -496,5 +511,6 @@ def test_exclude_function(mock_hass):
         "time.program1_start",
         "sensor.program1_remaining",
         "sensor.program1_default",
+        "sensor.program1_delay_time",
     ]
     assert excluded == expected
