@@ -414,6 +414,7 @@ async def test_rainpoint_sets_device_duration_before_open():
     zone.hass.services.async_call = AsyncMock()
     dur_state = MagicMock()
     dur_state.state = "60.0"
+    dur_state.attributes = {}  # no declared max: global cap applies
     zone.hass.states.get.return_value = dur_state
     registry, entries = _rainpoint_registry()
     name_p, water_p, wait_p, repeat_p = _zone_property_patches()
@@ -447,6 +448,7 @@ async def test_rainpoint_duration_set_skipped_when_already_right():
     zone.hass.services.async_call = AsyncMock()
     dur_state = MagicMock()
     dur_state.state = "20.0"  # already the target
+    dur_state.attributes = {"max": 240.0}
     zone.hass.states.get.return_value = dur_state
     registry, entries = _rainpoint_registry()
     name_p, water_p, wait_p, repeat_p = _zone_property_patches()
@@ -468,10 +470,12 @@ async def test_rainpoint_duration_set_skipped_when_already_right():
 
 
 async def test_rainpoint_duration_clamped_to_device_max():
-    """Durations above the 60-minute device maximum are clamped, not sent.
+    """Durations above the number entity's own max are clamped, not sent.
 
-    The devices reject opens with duration > 60 min outright (observed live:
-    such opens are logged as bare 'Closed()' and nothing waters).
+    number.set_value above the entity's declared max raises in HA core and
+    would abort the zone start, so the value must respect whatever cap the
+    device integration declares (60 on unpatched homgar), independent of
+    the global RAINPOINT_MAX_RUN_MINUTES ceiling.
     """
     zone = _full_rainpoint_zone(state=(False, "closed"))
     zone._zonedata.repeat = None
@@ -480,6 +484,7 @@ async def test_rainpoint_duration_clamped_to_device_max():
     zone.hass.services.async_call = AsyncMock()
     dur_state = MagicMock()
     dur_state.state = "40.0"
+    dur_state.attributes = {"max": 60.0}
     zone.hass.states.get.return_value = dur_state
     registry, entries = _rainpoint_registry()
     name_p, water_p, wait_p, repeat_p = _zone_property_patches()

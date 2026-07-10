@@ -91,6 +91,10 @@ class Zone(SwitchEntity, RestoreEntity):
     # last solenoid command issued ("open"/"close"); dedups the extra close the
     # teardown paths fire for optimistic zones, where local state cannot gate
     _solenoid_commanded: str | None = None
+    # statuses that were already true when the run started (a manual run of a
+    # disabled zone/program is an intentional override) and therefore must not
+    # stop that run when seen mid-run
+    _deliberate_stop_exempt: frozenset = frozenset()
 
     def __init__(
         self,
@@ -649,6 +653,48 @@ class Zone(SwitchEntity, RestoreEntity):
             await self.status_sensor_set()
         self.async_schedule_update_ha_state()
 
+    def _capture_deliberate_stop_exemptions(self) -> frozenset:
+        """Statuses exempt from stopping this run because they held at start.
+
+        A disabled zone (or a zone of a disabled program) can still be
+        started manually — an intentional override — so a disable that was
+        already in place when the run began is not a stop signal for that
+        run. A disable that arrives mid-run is.
+        """
+        exempt = set()
+        if self.enabled.state == CONST_OFF:
+            exempt.add(CONST_ZONE_DISABLED)
+        if not self._programdata.enabled.is_on:
+            exempt.add(CONST_PROGRAM_DISABLED)
+        return frozenset(exempt)
+
+    def _is_deliberate_stop(self, status) -> bool:
+        """True when the status is an explicit instruction to stop now.
+
+        These must terminate the zone cleanly — never be treated as a
+        device fault to re-arm against (a re-arm forces the valve open
+        against the operator).
+        """
+        if status in (CONST_ZONE_DISABLED, CONST_PROGRAM_DISABLED):
+            return status not in self._deliberate_stop_exempt
+        if status == CONST_RAINING_STOP:
+            return self.rain_behaviour != "finish"
+        return status == CONST_NO_WATER_SOURCE
+
+    def _valid_run_statuses(self) -> tuple:
+        """Statuses that mean the zone is still legitimately running.
+
+        program_disabled is included so a manual run of a zone in a
+        disabled program keeps its solenoid check (a non-exempt program
+        disable is stopped by handle_state_change before this matters).
+        With rain_behaviour 'finish', raining_stop is a still-running state
+        so the solenoid check keeps running and device drops still re-arm.
+        """
+        valid = (CONST_ON, CONST_RAINING, CONST_PROGRAM_DISABLED)
+        if self.rain_behaviour == "finish":
+            valid += (CONST_RAINING_STOP,)
+        return valid
+
     async def handle_state_change(self):
         """Validate if any state change impacts the continued running."""
 
@@ -663,6 +709,10 @@ class Zone(SwitchEntity, RestoreEntity):
         if self._status in (CONST_ON, CONST_PENDING, CONST_ECO, CONST_PROGRAM_DISABLED):
             if status == CONST_RAINING:
                 # rain option to continue
+                return self._status
+            if status == CONST_RAINING_STOP and self.rain_behaviour == "finish":
+                # rain option to finish: suspend new starts only, the
+                # active zone completes its start-sampled duration
                 return self._status
             if status == CONST_RAINING_STOP:
                 event_data = {
@@ -685,7 +735,7 @@ class Zone(SwitchEntity, RestoreEntity):
                 self._stop = True
                 self._aborted = True
 
-            if status in (CONST_NO_WATER_SOURCE):
+            if status in (CONST_NO_WATER_SOURCE,):
                 # No water source, sensor is off
                 async_dismiss(self.hass, "irrigation_water_source")
                 async_create(
@@ -697,6 +747,23 @@ class Zone(SwitchEntity, RestoreEntity):
                 event_data = {
                     "action": "error",
                     "error": "No water source detected",
+                    "device_id": self.entity_id,
+                    "scheduled": self._scheduled,
+                    "program": self.name,
+                }
+                self.hass.bus.async_fire("irrigation_event", event_data)
+                self._stop = True
+                self._aborted = True
+
+            if status in (
+                CONST_ZONE_DISABLED,
+                CONST_PROGRAM_DISABLED,
+            ) and self._is_deliberate_stop(status):
+                # an explicit disable arriving mid-run stops the zone
+                # cleanly; no persistent notification — the user did it
+                event_data = {
+                    "action": "zone_stopped",
+                    "reason": status,
                     "device_id": self.entity_id,
                     "scheduled": self._scheduled,
                     "program": self.name,
@@ -767,7 +834,7 @@ class Zone(SwitchEntity, RestoreEntity):
 
         if self._status == CONST_PAUSED:
             status = await self.handle_state_change()
-            if status not in (CONST_OFF):
+            if status not in (CONST_OFF,):
                 # reset the zone last status so reflected accurately after pause
                 self._last_status = (
                     CONST_RAINING if status == CONST_RAINING_STOP else status
@@ -779,7 +846,7 @@ class Zone(SwitchEntity, RestoreEntity):
 
         # check the sensor states
         status = await self.handle_state_change()
-        if status not in (CONST_OFF):
+        if status not in (CONST_OFF,):
             # real issue reset the zone
             self._status = CONST_RAINING if status == CONST_RAINING_STOP else status
             self._status_sensor = self._status
@@ -1097,9 +1164,10 @@ class Zone(SwitchEntity, RestoreEntity):
         RainPoint valves self-close after their per-valve duration setting, so
         a setting shorter than the V5 run silently under-waters. Resolve the
         sibling duration number on the valve's device and set it to the run
-        length plus a margin, clamped to the 60-minute maximum the devices
-        accept; the device timer then backstops the V5 close exactly like the
-        hydrawise/rainbird duration services.
+        length plus a margin, clamped to RAINPOINT_MAX_RUN_MINUTES (kept
+        above the largest schedulable run so the margin is never clamped
+        away — see const.py); the device timer then backstops the V5 close
+        exactly like the hydrawise/rainbird duration services.
         """
         registry = er.async_get(self.hass)
         entry = registry.async_get(self.solenoid)
@@ -1119,8 +1187,16 @@ class Zone(SwitchEntity, RestoreEntity):
         seconds = await self.calc_run_time(
             repeats_remaining=self.repeat, scheduled=self.scheduled
         )
-        minutes = min(math.ceil(seconds / 60) + 1, RAINPOINT_MAX_RUN_MINUTES)
         state = self.hass.states.get(number_entity)
+        # respect the number entity's own declared maximum (60 on unpatched
+        # homgar) — set_value above it raises and would abort the zone start
+        cap = RAINPOINT_MAX_RUN_MINUTES
+        if state:
+            try:
+                cap = min(cap, int(float(state.attributes.get("max"))))
+            except (TypeError, ValueError):
+                pass
+        minutes = min(math.ceil(seconds / 60) + 1, cap)
         try:
             current = float(state.state) if state else None
         except (TypeError, ValueError):
@@ -1449,6 +1525,7 @@ class Zone(SwitchEntity, RestoreEntity):
         # freezing last_ran at HA startup for any call without the argument
         if last_ran is None:
             last_ran = dt_util.as_local(dt_util.now())
+        self._deliberate_stop_exempt = self._capture_deliberate_stop_exemptions()
         self._state = self._status_sensor = self._status = CONST_ON
         await self.status_sensor_set()
         self.async_schedule_update_ha_state()
@@ -1554,6 +1631,22 @@ class Zone(SwitchEntity, RestoreEntity):
             # flipping the live status to adjusted_off; the device has not
             # closed the valve. Neither re-arm the lane nor terminate the zone
             # — let the run finish on its start-sampled duration.
+            return warning_issued
+        if status == CONST_RAINING_STOP and self.rain_behaviour == "finish":
+            # rain option to finish: the device is still open, the active
+            # zone completes; only new starts are suspended
+            return warning_issued
+        if self._is_deliberate_stop(status):
+            # an explicit stop signal (disable, rain-stop, no water) must
+            # terminate the zone, never re-arm the valve against it;
+            # handle_state_change fires the user-facing event on the same
+            # monitor cycle
+            self._stop = True
+            self._aborted = True
+            return warning_issued
+        if status in (CONST_ZONE_DISABLED, CONST_PROGRAM_DISABLED):
+            # exempt disable (the run started under it) — not a device
+            # drop, nothing to re-arm or terminate
             return warning_issued
         if self.uses_command_lane:
             if self._submit_cloud_command(opening=True):
@@ -1663,7 +1756,7 @@ class Zone(SwitchEntity, RestoreEntity):
                 # check the switch, rain and water source
                 await asyncio.sleep(1)
                 status = await self.get_status()
-                if status not in (CONST_ON, CONST_RAINING,CONST_PROGRAM_DISABLED):
+                if status not in self._valid_run_statuses():
                     continue
                 check_state, value = await self.check_switch_state()
                 if not check_state:
@@ -1742,7 +1835,7 @@ class Zone(SwitchEntity, RestoreEntity):
                 # check the switch, rain and water source
                 await asyncio.sleep(1)
                 status = await self.get_status()
-                if status not in (CONST_ON, CONST_RAINING,CONST_PROGRAM_DISABLED):
+                if status not in self._valid_run_statuses():
                     continue
                 check_state, value = await self.check_switch_state()
                 if not check_state:

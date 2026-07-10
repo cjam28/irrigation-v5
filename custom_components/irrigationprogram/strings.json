@@ -31,7 +31,8 @@
 		"rain_behaviour": {
 			"options": {
 				"stop": "Stop the program",
-				"continue": "Allow program to complete"
+				"continue": "Allow program to complete",
+				"finish": "Complete the active zone, stop the rest"
 			}
 		},
 		"interlock": {

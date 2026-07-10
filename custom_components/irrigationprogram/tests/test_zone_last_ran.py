@@ -30,6 +30,9 @@ class _MinimalZone:
     ignore_sensors = True
     repeat = 0
 
+    def _capture_deliberate_stop_exemptions(self):
+        return frozenset()
+
     async def status_sensor_set(self, *args, **kwargs):
         return None
 

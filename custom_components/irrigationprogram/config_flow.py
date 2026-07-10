@@ -625,7 +625,7 @@ class IrrigationFlowHandler(config_entries.ConfigFlow):
                     },
                 ): sel.SelectSelector(
                     {
-                        "options": ["stop", "continue"],
+                        "options": ["stop", "continue", "finish"],
                         "translation_key": ATTR_RAIN_BEHAVIOUR,
                     }
                 ),
@@ -926,7 +926,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     },
                 ): sel.SelectSelector(
                     {
-                        "options": ["stop", "continue"],
+                        "options": ["stop", "continue", "finish"],
                         "translation_key": ATTR_RAIN_BEHAVIOUR,
                     }
                 ),

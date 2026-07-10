@@ -158,7 +158,7 @@ class IrrigationProgram:
     freq: bool
     repeat: bool
     repeats: Any|NumberEntity
-    rain_behaviour: str  # stop|continue
+    rain_behaviour: str  # stop|continue|finish
     enabled: Any|SwitchEntity  # generated
     controller_type: str  # rainbird|generic
     inter_zone_delay: Any|NumberEntity  # generated
