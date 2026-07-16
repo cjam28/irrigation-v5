@@ -336,6 +336,12 @@ class IrrigationProgram(SwitchEntity, RestoreEntity):
 
         await self.async_turn_off()
 
+        # release this program's shared-pump registrations and bus listeners
+        # so a reloaded entry can't be counted as still holding the pump
+        for pumpobj in self._pumps:
+            pumpobj.detach()
+        self._pumps = []
+
         if self._unsub_point_in_time:
             self._unsub_point_in_time()
             self._unsub_point_in_time = None

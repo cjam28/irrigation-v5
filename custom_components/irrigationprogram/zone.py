@@ -18,6 +18,7 @@ from homeassistant.const import (
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
 )
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util, slugify
@@ -755,12 +756,17 @@ class Zone(SwitchEntity, RestoreEntity):
                 self._stop = True
                 self._aborted = True
 
-            if status in (
-                CONST_ZONE_DISABLED,
-                CONST_PROGRAM_DISABLED,
-            ) and self._is_deliberate_stop(status):
+            if (
+                status in (CONST_ZONE_DISABLED, CONST_PROGRAM_DISABLED)
+                and self._state == CONST_ON
+                and self._is_deliberate_stop(status)
+            ):
                 # an explicit disable arriving mid-run stops the zone
-                # cleanly; no persistent notification — the user did it
+                # cleanly; no persistent notification — the user did it.
+                # _state gates on the run lifecycle: an IDLE zone of a
+                # disabled program re-enters here on every monitor tick
+                # (calc_next_run leaves _status = program_disabled) and must
+                # not re-fire the event against stale run-start exemptions
                 event_data = {
                     "action": "zone_stopped",
                     "reason": status,
@@ -1250,44 +1256,65 @@ class Zone(SwitchEntity, RestoreEntity):
         # and re-issuing an open is idempotent; others only fire when not on
         if check_state is False or self.optimistic:
             self._solenoid_commanded = "open"
-            if self.controller_type == RAINBIRD:
-                # RAINBIRD controller requires a different service call
-                await self._call_duration_controller(
-                    RAINBIRD, RAINBIRD_TURN_ON, RAINBIRD_DURATION
+            try:
+                if self.controller_type == RAINBIRD:
+                    # RAINBIRD controller requires a different service call
+                    await self._call_duration_controller(
+                        RAINBIRD, RAINBIRD_TURN_ON, RAINBIRD_DURATION
+                    )
+                elif self.controller_type == BHYVE:
+                    # B-Hyve controller requires a different service call
+                    await self._call_duration_controller(
+                        BHYVE, BHYVE_TURN_ON, BHYVE_DURATION
+                    )
+                elif self.controller_type == HYDRAWISE and (
+                    watering_sensor := self._hydrawise_watering_sensor()
+                ):
+                    # Hydrawise self-times like B-Hyve, but its start_watering
+                    # service targets the zone's watering binary_sensor, not the
+                    # configured valve/switch; it closes via valve.close_valve.
+                    # With no resolvable sensor, fall through to a plain open.
+                    await self._call_duration_controller(
+                        HYDRAWISE,
+                        HYDRAWISE_TURN_ON,
+                        HYDRAWISE_DURATION,
+                        target=watering_sensor,
+                    )
+                elif self.controller_type == RAINPOINT:
+                    # cloud valve: arm the device's own duration backstop, then
+                    # queue the open on the serialized command lane
+                    await self._set_rainpoint_device_duration()
+                    self._submit_cloud_command(opening=True)
+                elif self.entity_type == CONST_VALVE:
+                    # valve
+                    await self.hass.services.async_call(
+                        CONST_VALVE, SERVICE_OPEN_VALVE, {ATTR_ENTITY_ID: self.solenoid}
+                    )
+                else:
+                    # switch
+                    await self.hass.services.async_call(
+                        CONST_SWITCH, SERVICE_TURN_ON, {ATTR_ENTITY_ID: self.solenoid}
+                    )
+            except HomeAssistantError as err:
+                # a raising start (target integration unloaded/reloading at
+                # start time raises ServiceNotFound synchronously) must abort
+                # THIS zone cleanly — an escaping exception kills the run task
+                # with the zone still queued, wedging the program ON until a
+                # restart
+                _LOGGER.error("%s failed to start: %s", self.name, err)
+                self.hass.bus.async_fire(
+                    "irrigation_event",
+                    {
+                        "action": "zone_start_failed",
+                        "device_id": self.solenoid,
+                        "zone": self.name,
+                        "error": str(err),
+                        "program": self._programdata.switch.entity_id,
+                    },
                 )
-            elif self.controller_type == BHYVE:
-                # B-Hyve controller requires a different service call
-                await self._call_duration_controller(
-                    BHYVE, BHYVE_TURN_ON, BHYVE_DURATION
-                )
-            elif self.controller_type == HYDRAWISE and (
-                watering_sensor := self._hydrawise_watering_sensor()
-            ):
-                # Hydrawise self-times like B-Hyve, but its start_watering
-                # service targets the zone's watering binary_sensor, not the
-                # configured valve/switch; it closes via valve.close_valve.
-                # With no resolvable sensor, fall through to a plain open.
-                await self._call_duration_controller(
-                    HYDRAWISE,
-                    HYDRAWISE_TURN_ON,
-                    HYDRAWISE_DURATION,
-                    target=watering_sensor,
-                )
-            elif self.controller_type == RAINPOINT:
-                # cloud valve: arm the device's own duration backstop, then
-                # queue the open on the serialized command lane
-                await self._set_rainpoint_device_duration()
-                self._submit_cloud_command(opening=True)
-            elif self.entity_type == CONST_VALVE:
-                # valve
-                await self.hass.services.async_call(
-                    CONST_VALVE, SERVICE_OPEN_VALVE, {ATTR_ENTITY_ID: self.solenoid}
-                )
-            else:
-                # switch
-                await self.hass.services.async_call(
-                    CONST_SWITCH, SERVICE_TURN_ON, {ATTR_ENTITY_ID: self.solenoid}
-                )
+                self._stop = True
+                self._aborted = True
+                return
 
             event_data = {
                 "action": "zone_turned_on",
@@ -1317,21 +1344,37 @@ class Zone(SwitchEntity, RestoreEntity):
         self._solenoid_commanded = "close"
 
         # is it a valve or a switch
-        if self.controller_type == BHYVE:
-            await self.hass.services.async_call(
-                BHYVE, "stop_watering", {ATTR_ENTITY_ID: self.solenoid}
-            )
-        elif self.controller_type == RAINPOINT:
-            # cloud valve: queue the close on the serialized command lane
-            self._submit_cloud_command(opening=False)
-        elif self.entity_type == CONST_VALVE:
-            # postion entity defined get the value
-            await self.hass.services.async_call(
-                CONST_VALVE, SERVICE_CLOSE_VALVE, {ATTR_ENTITY_ID: self.solenoid}
-            )
-        else:
-            await self.hass.services.async_call(
-                CONST_SWITCH, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: self.solenoid}
+        try:
+            if self.controller_type == BHYVE:
+                await self.hass.services.async_call(
+                    BHYVE, "stop_watering", {ATTR_ENTITY_ID: self.solenoid}
+                )
+            elif self.controller_type == RAINPOINT:
+                # cloud valve: queue the close on the serialized command lane
+                self._submit_cloud_command(opening=False)
+            elif self.entity_type == CONST_VALVE:
+                # postion entity defined get the value
+                await self.hass.services.async_call(
+                    CONST_VALVE, SERVICE_CLOSE_VALVE, {ATTR_ENTITY_ID: self.solenoid}
+                )
+            else:
+                await self.hass.services.async_call(
+                    CONST_SWITCH, SERVICE_TURN_OFF, {ATTR_ENTITY_ID: self.solenoid}
+                )
+        except HomeAssistantError as err:
+            # a raising close must never escape the teardown path — the
+            # program's unwind (last-ran stamping, pump-off, queue cleanup)
+            # has to complete even when the target integration is unloaded
+            _LOGGER.error("%s failed to stop: %s", self.name, err)
+            self.hass.bus.async_fire(
+                "irrigation_event",
+                {
+                    "action": "zone_stop_failed",
+                    "device_id": self.solenoid,
+                    "zone": self.name,
+                    "error": str(err),
+                    "program": self._programdata.switch.entity_id,
+                },
             )
 
         # raise an event

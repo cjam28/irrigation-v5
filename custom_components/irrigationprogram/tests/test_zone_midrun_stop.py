@@ -191,6 +191,7 @@ async def test_non_optimistic_zone_stops_quietly_on_zone_disabled():
 def _state_change_zone(status, rain_behaviour="stop", internal=CONST_ON):
     zone = _run_state_zone("rainpoint", rain_behaviour=rain_behaviour)
     zone._status = internal
+    zone._state = CONST_ON  # a run in progress, as async_turn_on_from_program sets
     zone.get_status = AsyncMock(return_value=status)
     return zone
 
@@ -318,3 +319,72 @@ async def test_adjusted_off_still_neither_stops_nor_rearms():
         )
     lane.submit.assert_not_called()
     assert zone._stop is False
+
+
+# --- zone-start service failure must not wedge the program ------------------
+
+
+async def test_service_error_on_start_aborts_zone_cleanly():
+    """A raising duration-service start (integration unloaded at start time)
+    must abort the zone - not kill the run task and wedge the program ON."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    zone = _run_state_zone("rainbird")
+    zone._pump = None
+    zone._remaining_time = 600
+    zone.check_switch_state = AsyncMock(return_value=(False, "off"))
+    zone.calc_run_time = AsyncMock(return_value=600)
+    # HomeAssistantError is ServiceNotFound's base; ServiceNotFound itself
+    # needs a running hass to stringify, which a bare test loop lacks
+    zone.hass.services.async_call = AsyncMock(
+        side_effect=HomeAssistantError("service rainbird.start_irrigation not found")
+    )
+    with (
+        _name_patch(),
+        patch.object(Zone, "water", new_callable=PropertyMock, return_value=10),
+        patch.object(Zone, "wait", new_callable=PropertyMock, return_value=0),
+        patch.object(Zone, "repeat", new_callable=PropertyMock, return_value=1),
+        patch.object(Zone, "scheduled", new_callable=PropertyMock, return_value=False),
+    ):
+        zone.entity_id = "switch.z1"
+        await zone.async_solenoid_turn_on()
+    assert zone._stop is True
+    assert zone._aborted is True
+    actions = [c.args[1]["action"] for c in zone.hass.bus.async_fire.call_args_list]
+    assert "zone_start_failed" in actions
+    assert "zone_turned_on" not in actions
+
+
+async def test_service_error_on_stop_does_not_raise():
+    """A raising close call must not propagate out of the teardown path."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    zone = _run_state_zone("Generic")
+    zone._zonedata.type = "switch"
+    zone._zonedata.zone = "switch.z1"
+    zone._state = "on"
+    zone.check_switch_state = AsyncMock(return_value=(True, "on"))
+    zone.hass.services.async_call = AsyncMock(
+        side_effect=HomeAssistantError("service switch.turn_off not found")
+    )
+    with _name_patch():
+        zone.entity_id = "switch.z1"
+        await zone.async_solenoid_turn_off()
+    actions = [c.args[1]["action"] for c in zone.hass.bus.async_fire.call_args_list]
+    assert "zone_stop_failed" in actions
+
+
+# --- disable while idle must not re-fire the deliberate-stop path -----------
+
+
+async def test_idle_zone_of_disabled_program_does_not_refire_stop():
+    """A zone that is NOT running (its last run ended, program disabled) must
+    not re-fire zone_stopped / re-set _stop on monitor ticks."""
+    zone = _state_change_zone(CONST_PROGRAM_DISABLED)
+    zone._state = "off"  # idle: no run lifecycle in progress
+    zone._status = CONST_PROGRAM_DISABLED  # what calc_next_run leaves behind
+    with _name_patch():
+        zone.entity_id = "switch.z1"
+        await zone.handle_state_change()
+    assert zone._stop is False
+    zone.hass.bus.async_fire.assert_not_called()

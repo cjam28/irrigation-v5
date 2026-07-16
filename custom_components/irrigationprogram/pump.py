@@ -24,6 +24,11 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# hass.data key: pump entity_id -> [PumpClass, ...] across ALL config entries.
+# Two programs may declare the same physical pump/master; a program finishing
+# must not close it while another program that declares it is still running.
+PUMP_REGISTRY = "irrigationprogram_shared_pumps"
+
 
 class PumpClass:
     """Pump class."""
@@ -39,10 +44,44 @@ class PumpClass:
         self._program = program
         self._cancel = None
 
+        registry = hass.data.setdefault(PUMP_REGISTRY, {})
+        if isinstance(registry, dict):
+            registry.setdefault(pump, []).append(self)
+
         # turn off the pump on start
         hass.async_create_task(self.async_stop())
 
         self._cancel = hass.bus.async_listen("irrigation_event", self.handle_event)
+
+    def detach(self):
+        """Stop listening and leave the shared-pump registry (program unload)."""
+        if self._cancel:
+            self._cancel()
+            self._cancel = None
+        registry = self.hass.data.get(PUMP_REGISTRY)
+        if isinstance(registry, dict):
+            peers = registry.get(self._pump, [])
+            if self in peers:
+                peers.remove(self)
+
+    def _other_program_holds_pump(self) -> bool:
+        """True while another program sharing this pump entity is running.
+
+        Checked against the other PROGRAM's switch, not its zone entities:
+        programs sharing a pump can alias the same physical zone entities,
+        so the closing program's own winding-down zones would read as the
+        other program still needing the pump.
+        """
+        registry = self.hass.data.get(PUMP_REGISTRY)
+        if not isinstance(registry, dict):
+            return False
+        for peer in registry.get(self._pump, []):
+            if peer is self or peer._program is None:
+                continue
+            state = self.hass.states.get(peer._program.entity_id)
+            if state and state.state == CONST_ON:
+                return True
+        return False
 
     async def handle_event(self, event):
         """Inspect irrigation events."""
@@ -56,7 +95,8 @@ class PumpClass:
             await self.async_start()
 
         if event.data.get("action") == "turn_off_pump_all":
-            await self.async_stop()
+            if not self._other_program_holds_pump():
+                await self.async_stop()
 
         if event.data.get("action") == "turn_off_pump":
             # Now need to determine if other zones are running that
@@ -69,7 +109,8 @@ class PumpClass:
                 ) and zone.zone != event.data.get("device_id"):
                     break
             else:
-                await self.async_stop()
+                if not self._other_program_holds_pump():
+                    await self.async_stop()
 
     @property
     def zones(self) -> list:
